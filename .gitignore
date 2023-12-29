@@ -1,6 +1,0 @@
-# ignore files
-.gitignore
-.gitattributes
-*.svd
-*.cfg
-*.json
