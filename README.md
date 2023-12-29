@@ -1,8 +1,9 @@
 # MEMS Seismometer
-Consists of [M5Stack Tough](https://docs.m5stack.com/en/core/tough) and [ADXL355](https://www.analog.com/en/products/adxl355.html#product-overview)
 
 ## Prerequisite
-[modified version](https://github.com/T40O0/M5_ADXL355/tree/M5) of [plasmapper/adxl355-arduino](https://github.com/plasmapper/adxl355-arduino)  
+ - ADXL355 ([EVAL-ADXL355-PMDZ](https://www.analog.com/en/products/adxl355.html#product-overview))
+ - [M5Stack Tough](https://docs.m5stack.com/en/core/tough) 
+ - [modified version](https://github.com/T40O0/M5_ADXL355/tree/M5) of [plasmapper/adxl355-arduino](https://github.com/plasmapper/adxl355-arduino)  
 Hats off to PL.
 
 ## Features
