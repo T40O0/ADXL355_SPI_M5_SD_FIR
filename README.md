@@ -24,6 +24,11 @@ Mounting the ADXL355 into a 3D-printed frame.
 The code can be uploaded to your board using the Arduino IDE.  
 Before uploading, copy the [FIR filter file](into_library/) into your library folder.
 
+## Note
+ - RTC setting required; measurement will only start if RTC year is set between 2024 and 2025. Modify line 135 if necessary.
+   `while((dt.date.year < 2024) || (dt.date.year > 2025)) {`  
+ - Data output from the ADXL355 at 500 Hz is decimated to 100 Hz. The supplied FIR filter is a 50 Hz high-cut filter for 500 Hz. If you want to change the frequency, create a new FIR filter file.
+
 ## Licence
 This project is licensed under the MIT licence - see the [LICENSE file](LICENSE) for details.
 
