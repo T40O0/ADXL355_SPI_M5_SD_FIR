@@ -8,8 +8,8 @@
 Hats off to PL.
 
 ## Features
- - Three components (xyz)  
- - 100Hz sampling (with 500Hz FIR filter)  
+ - Three components of acceleration (cm/sec/sec)
+ - 100Hz sampling (with 50Hz high-cut FIR filter)
  - Recording to TF card
 
 ## Installation
@@ -20,12 +20,12 @@ Hats off to PL.
 Mounting the ADXL355 into a 3D-printed frame.  
 <img src="images/set.JPG" width="500">
 
-3. Write Code  
+3. Write  
 The code can be uploaded to your board using the Arduino IDE.  
 Before uploading, copy the [FIR filter file](into_library/) into your library folder.
 
 ## Note
- - RTC setting required; measurement will only start if RTC year is set between 2024 and 2025. Modify line 135 if necessary.
+ - RTC setting required; measurement will only start if RTC year is set between 2024 and 2025. Modify line 135 if necessary.  
    `while((dt.date.year < 2024) || (dt.date.year > 2025)) {`  
  - Data output from the ADXL355 at 500 Hz is decimated to 100 Hz. The supplied FIR filter is a 50 Hz high-cut filter for 500 Hz. If you want to change the frequency, create a new FIR filter file.
 
