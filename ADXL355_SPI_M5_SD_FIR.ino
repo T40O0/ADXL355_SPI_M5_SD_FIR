@@ -132,7 +132,7 @@ void setup() {
   // Strat RTC
   dt = M5.Rtc.getDateTime();
   txtWrite("RTC begginig...", TFT_BLACK);
-  while((dt.date.year < 2023) || (dt.date.year > 2024)) {
+  while((dt.date.year < 2024) || (dt.date.year > 2025)) {
     Serial.println(dt.date.year);
     delay(10);//msec wait
     dt = M5.Rtc.getDateTime();
