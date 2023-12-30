@@ -1,4 +1,5 @@
-# MEMS Seismometer
+# MEMS Seismometer  
+<img src="images/wave.png"  width="800">
 
 ## Prerequisite
  - ADXL355 ([EVAL-ADXL355-PMDZ](https://www.analog.com/en/products/adxl355.html#product-overview))
