@@ -28,8 +28,15 @@ The code can be uploaded to your board using the Arduino IDE.
 Before uploading, copy the [FIR filter file](into_library/) into your library folder.
 
 ## Note
- - RTC setting required; measurement will only start if RTC year is set between 2024 and 2025. Modify line 135 if necessary.  
-   `while((dt.date.year < 2024) || (dt.date.year > 2025)) {`  
+ - RTC setting required; measurement will only start if RTC year is set between 2024 and 2025. Modify line 276 if necessary.  
+   `while((dt.date.year < 2024) || (dt.date.year > 2025)) {`
+ - If you can connect to Wi-Fi, touch the button that appears on the startup screen. M5Tough will access any NTP server and start resetting the RTC. Just change lines 12-17 to suit your environment. Once completed, the measurement will start automatically.  
+   `#define WIFI_SSID     "your id"`  
+   `#define WIFI_PASSWORD "your pass"`  
+   `#define NTP_TIMEZONE  "your zone"`  
+   `#define NTP_SERVER1   "your server1"`  
+   `#define NTP_SERVER1   "your server2"`  
+   `#define NTP_SERVER1   "your server3"`  
  - Data output from the ADXL355 at 500 Hz is decimated to 100 Hz. The supplied FIR filter is a 50 Hz high-cut filter for 500 Hz. If you want to change the frequency, create a new FIR filter file.
  - A file is created every minute (RTC based) and acceleration data is written to the file every 15 seconds (clock based). Because of the different counting bases, it rarely happens that one file contains 45 secondof data and the next file contains 75 seconds of data.
  - A "[hat](3D_model/hat.stl)" is recommended for outdoor use.
