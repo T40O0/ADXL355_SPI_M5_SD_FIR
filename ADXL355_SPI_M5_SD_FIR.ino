@@ -266,13 +266,13 @@ void setup() {
 
   // Strat SD
   while (!SD.begin(GPIO_NUM_4, SPI, 10000000)) { //SPI: 1kHz-10MHz
-    Serial.println("ERROR: SD CARD.");
+    txtWrite("ERROR: SD CARD", BLACK);
     delay(100);
   }
 
   // Strat RTC
   dt = M5.Rtc.getDateTime();
-  txtWrite("RTC begginig...", TFT_BLACK);
+  txtWrite("RTC begginig...", BLACK);
   while((dt.date.year < 2024) || (dt.date.year > 2025)) {
     Serial.println(dt.date.year);
     delay(10);//msec wait
@@ -326,7 +326,7 @@ void TaskRead(void *pvParameters) {
   
   // TaskRead start time
   dt = M5.Rtc.getDateTime();
-  txtWrite("waite starting...", TFT_BLACK);
+  txtWrite("waite starting...", BLACK);
   while(dt.time.seconds!=0) {
     //Serial.println("waite starting...");
     delay(1);//msec wait
