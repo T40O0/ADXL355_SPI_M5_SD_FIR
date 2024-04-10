@@ -32,6 +32,7 @@ There are three options before the measurement starts.
 1. Power On >> Wait 30 seconds >> Start
 2. Power On >> RTC Reset >> Start
 3. Power On >> Set Wi-Fi Access Point >> RTC Reset >> Start
+<img src="images/start.JPG"  width="400">
 
 ## Note
  - RTC setting required; measurement will only start if RTC year is set between 2024 and 2025. Modify line 298 if necessary.  
