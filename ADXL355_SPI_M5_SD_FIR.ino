@@ -8,13 +8,10 @@
 // https://github.com/m5stack/M5Unified/blob/master/examples/Basic/Rtc/Rtc.ino
 
 #if defined ( ARDUINO )
-
-#define WIFI_SSID     "your id"
-#define WIFI_PASSWORD "your pass"
-#define NTP_TIMEZONE  "your zone"
-#define NTP_SERVER1   "your server1"
-#define NTP_SERVER2   "your server2"
-#define NTP_SERVER3   "your server3"
+#define NTP_TIMEZONE  "JST-9"
+#define NTP_SERVER1   "ntp2.jst.mfeed.ad.jp"
+#define NTP_SERVER2   "ntp1.jst.mfeed.ad.jp"
+#define NTP_SERVER3   "ntp.nict.jp"
 
 #include <WiFi.h>
 
@@ -32,7 +29,6 @@
 #ifndef SNTP_ENABLED
 #define SNTP_ENABLED 0
 #endif
-
 //==============================================================================
 
 unsigned int hz = 100; 
@@ -122,28 +118,26 @@ void createFile() {
 //==============================================================================
 
 void Set_RTC() {
-  M5.Lcd.fillScreen(BLACK);
+  M5.Lcd.fillScreen(WHITE);
   M5.Lcd.setCursor(0,0);
   if (!M5.Rtc.isEnabled())
   {
     M5.Lcd.println("RTC not found.");
     delay(500);
   }
-  M5.Lcd.fillScreen(BLACK);
+  M5.Lcd.fillScreen(WHITE);
   M5.Lcd.setCursor(0,0);
   M5.Lcd.println("RTC found.");
   delay(1000);
   
-  M5.Lcd.fillScreen(BLACK);
   M5.Lcd.setCursor(0,0);
   M5.Lcd.print("WiFi: Searching.");
-  WiFi.begin( WIFI_SSID, WIFI_PASSWORD );
+  WiFi.begin();
   while (WiFi.status() != WL_CONNECTED)
   {
     M5.Lcd.print('.');
     delay(1000);
   }
-  M5.Lcd.fillScreen(BLACK);
   M5.Lcd.setCursor(0,0);
   M5.Lcd.print("Wifi: Connected.");
 
@@ -167,7 +161,7 @@ void Set_RTC() {
   M5.Rtc.setDateTime( localtime( &t )); // for local timezone.
 
   // Show 10sec
-  M5.Lcd.fillScreen(BLACK);
+  M5.Lcd.fillScreen(WHITE);
   for (int i = 100; i > 0; --i) {
     static constexpr const char* const wd[7] = {"Sun","Mon","Tue","Wed","Thr","Fri","Sat"};
     delay(100);
@@ -194,7 +188,24 @@ void Set_RTC() {
           );
     M5.Lcd.setCursor(0,70);
     M5.Lcd.print("The next program will start soon.");
-  } 
+  }
+  WiFi.disconnect(true);
+}
+//==============================================================================
+void Set_WiFi(){
+  M5.Lcd.fillScreen(WHITE);
+  M5.Lcd.setCursor(10, 10);
+  M5.Lcd.println("Use your phone to select Wi-Fi.");
+
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.beginSmartConfig();
+  //Wait for SmartConfig packet from mobile
+  M5.Lcd.setCursor(10, 30);
+  M5.Lcd.println("Waiting for SmartConfig.");
+  while (!WiFi.smartConfigDone()) {
+    delay(500);
+  }
+  Set_RTC();
 }
 //==============================================================================
 
@@ -217,24 +228,35 @@ void setup() {
 
   //==============================================================================
   // Select whether to reset the RTC
-  // This is your button on the screen. You can adjust position and size as needed.
-  M5.Lcd.fillRoundRect (60, 120, 200, 50, 10, RED ); 
-  M5.Lcd.fillRoundRect (64, 124, 192, 42, 10, ORANGE); 
-  M5.Lcd.setCursor(95, 133);
+  M5.Lcd.fillScreen(WHITE);
+  int x=60,  y=100, w=200, h=50, r=10;
+  M5.Lcd.fillRoundRect (x, y, w, h, r, RED ); //x,y,w,h,r
+  M5.Lcd.fillRoundRect (x+4, y+4, w-8, h-8, r, ORANGE); 
+  M5.Lcd.setCursor(95, 113);
   M5.Lcd.setTextFont(4);
   M5.Lcd.setTextColor(BLACK, BLACK); 
-  M5.Lcd.println("Press Here!");
+  M5.Lcd.println("Reset RTC!");
+  //wifi setting bottun
+  M5.Lcd.fillRoundRect (x, y+h+10, w, h, r, RED ); 
+  M5.Lcd.fillRoundRect (x+4, y+h+10+4, w-8, h-8, r, ORANGE); 
+  M5.Lcd.setCursor(85, 173);
+  M5.Lcd.setTextColor(BLACK, BLACK); 
+  M5.Lcd.println("Wi-Fi Setting");
+
   //reset font
   M5.Lcd.setTextFont(2);
-  M5.Lcd.setTextColor(WHITE, BLACK);
+  M5.Lcd.setTextColor(BLACK, WHITE);
   // Show 30sec countdown
   for (float i = 3000.; i > 0.; --i) {
     M5.update();
-    int16_t x = M5.Touch.getDetail().x;
-    int16_t y = M5.Touch.getDetail().y;
+    int16_t xt = M5.Touch.getDetail().x;
+    int16_t yt = M5.Touch.getDetail().y;
       
-    if (x >= 60 && x <= 260 && y >= 120 && y <= 170) {
+    if (xt >= x && xt <= x+w && yt >= y && yt <= y+h) {
       Set_RTC();
+      break;
+    }else if(xt >= x && xt <= x+w && yt >= y+h+10 && yt <= y+h+10+h){
+      Set_WiFi();
       break;
     }
 
