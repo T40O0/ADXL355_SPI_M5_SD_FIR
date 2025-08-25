@@ -42,7 +42,7 @@ int fileDate = 0;
 int fileDateTime;
 File f;
 
-const String accHeader = "Time(msec), x(cm/s2), y(cm/s2), z(cm/s2)";
+const String accHeader = "Time(msec),x(cm/s2),y(cm/s2),z(cm/s2)";
 double AccX = 0.;
 double AccY = 0.;
 double AccZ = 0.;
