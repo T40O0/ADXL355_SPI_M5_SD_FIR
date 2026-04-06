@@ -268,7 +268,7 @@ void setup() {
   }
   //==============================================================================
 
-  M5.In_I2C.release();
+  //M5.In_I2C.release();
 
   // Initialize ADXL355
   adxl355.begin();
@@ -295,7 +295,7 @@ void setup() {
   // Strat RTC
   dt = M5.Rtc.getDateTime();
   txtWrite("RTC begginig...", BLACK);
-  while((dt.date.year < 2024) || (dt.date.year > 2025)) {
+  while((dt.date.year < 2026) || (dt.date.year > 2031)) {
     Serial.println(dt.date.year);
     delay(10);//msec wait
     dt = M5.Rtc.getDateTime();
