@@ -35,16 +35,16 @@ There are three options before the measurement starts.
 <img src="images/start.JPG"  width="400">
 
 ## Note
- - RTC setting required; measurement will only start if RTC year is set between 2026 and 2031. Modify line 298 if necessary.  
+ - RTC setting required; Measurements will only start if the RTC year is set between 2026 and 2031. Modify line 298 if necessary.  
    `while((dt.date.year < 2026) || (dt.date.year > 2031)) {`
- - If you can connect to Wi-Fi, touch a button "Reset RTC!" that appears on the startup screen. M5Tough will access any NTP server and start resetting the RTC. Just change lines 11-14 to suit your environment. Once completed, the measurement will start automatically.  
+ - If you can connect to Wi-Fi, touch a button "Reset RTC!" that appears on the startup screen. The M5Tough will access any NTP server and start resetting the RTC. Just edit lines 11-14 to suit your environment. Once completed, the measurement will start automatically.  
    `#define NTP_TIMEZONE  "your zone"`  
    `#define NTP_SERVER1   "your server1"`  
    `#define NTP_SERVER1   "your server2"`  
    `#define NTP_SERVER1   "your server3"`
- - If you are connecting M5Tough to Wi-Fi for the first time, or if you want to connect to a different Wi-Fi access point than the last time, touch "Wi-Fi Settings". You can change the Wi-Fi setting from  an "ESP Touch" app on your phone. The app will display the Wi-Fi access point your phone is connected to, so please enter the password, and it will be reflected on the M5Tough.
- - Data output from the ADXL355 at 500 Hz is decimated to 100 Hz. The supplied FIR filter is a 50 Hz high-cut filter for 500 Hz. If you want to change the frequency, create a new FIR filter file.
- - A file is created every minute (RTC based) and acceleration data is written to the file every 15 seconds (clock based). Because of the different counting bases, it rarely happens that one file contains 45 secondof data and the next file contains 75 seconds of data.
+ - If you want to connect the M5Tough to Wi-Fi for the first time or to a different access point, select "Wi-Fi Settings." Then, use the "ESP Touch" or "ESP SmartConfig" app on your phone to change the Wi-Fi settings. The app will display the access point to which your phone is currently connected. Enter the password, and it will appear on the M5Tough.
+ - Data output from the ADXL355 at 500 Hz is decimated to 100 Hz. The supplied FIR filter is a high-cut filter with a cutoff frequency of 50 Hz for 500 Hz. To change the frequency, create a new FIR filter file.
+ - A file is created every minute (RTC based) and acceleration data is written to the file every 15 seconds (clock based). Due to the different counting bases, it rarely happens that one file contains 45 secondof data and the next file contains 75 seconds of data.
  - A "[hat](3D_model/hat.stl)" is recommended for outdoor use.
    - [x] Blocks sunlight and protects the LCD.
    - [x] Falling volcanic ash is washed away by rain.
