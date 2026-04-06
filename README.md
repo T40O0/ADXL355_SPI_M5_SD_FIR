@@ -35,8 +35,8 @@ There are three options before the measurement starts.
 <img src="images/start.JPG"  width="400">
 
 ## Note
- - RTC setting required; measurement will only start if RTC year is set between 2024 and 2025. Modify line 298 if necessary.  
-   `while((dt.date.year < 2024) || (dt.date.year > 2025)) {`
+ - RTC setting required; measurement will only start if RTC year is set between 2026 and 2031. Modify line 298 if necessary.  
+   `while((dt.date.year < 2026) || (dt.date.year > 2031)) {`
  - If you can connect to Wi-Fi, touch a button "Reset RTC!" that appears on the startup screen. M5Tough will access any NTP server and start resetting the RTC. Just change lines 11-14 to suit your environment. Once completed, the measurement will start automatically.  
    `#define NTP_TIMEZONE  "your zone"`  
    `#define NTP_SERVER1   "your server1"`  
