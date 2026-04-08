@@ -8,12 +8,12 @@
 Hats off to PL.
 
 ## Features
- - Cheap; can be made for about 100€.
- - Records three acceleration components (cm/sec/sec)
- - 100Hz sampling (with 50Hz high-cut FIR filter)
- - Stores files on TF card.
- - Dust and water resistant (Do not immerse the case in water or other liquids.)
- - UV-resistant plastic; can be used outdoors and in areas where acid gases are generated, such as volcanic regions.
+ - Cost-effective: It can be made for about €100.
+ - Records three acceleration components (cm/sec/sec).
+ - 100 Hz sampling with 50 Hz high-cut FIR filter.
+ - Stores files on a TF card.
+ - Dust- and water-resistant (do not submerge the case in water or other liquids).
+ - Made of UV-resistant plastic, so it can be used outdoors and in areas where acid gases are generated, such as volcanic regions.
 
 ## Installation
 1. Connect ADXL355  
@@ -35,16 +35,16 @@ There are three options before the measurement starts.
 <img src="images/start.JPG"  width="400">
 
 ## Note
- - RTC setting required; Measurements will only start if the RTC year is set between 2026 and 2031. Modify line 298 if necessary.  
+ - RTC setting required: measurements will only start if the RTC year is set between 2026 and 2031. Modify line 298 if necessary.  
    `while((dt.date.year < 2026) || (dt.date.year > 2031)) {`
- - If you can connect to Wi-Fi, touch a button "Reset RTC!" that appears on the startup screen. The M5Tough will access any NTP server and start resetting the RTC. Just edit lines 11-14 to suit your environment. Once completed, the measurement will start automatically.  
+ - If you can connect to Wi-Fi, touch the "Reset RTC!" button that appears on the startup screen. The M5Tough will access any NTP server and start resetting the RTC. Just edit lines 11-14 to suit your environment. Once completed, the measurement will start automatically.  
    `#define NTP_TIMEZONE  "your zone"`  
    `#define NTP_SERVER1   "your server1"`  
    `#define NTP_SERVER1   "your server2"`  
    `#define NTP_SERVER1   "your server3"`
  - If you want to connect the M5Tough to Wi-Fi for the first time or to a different access point, select "Wi-Fi Settings." Then, use the "SmartConfig ESP" or "ESP Touch" app on your phone to change the Wi-Fi settings. The app will display the access point to which your phone is currently connected. Enter the password, and it will appear on the M5Tough.
  - Data output from the ADXL355 at 500 Hz is decimated to 100 Hz. The supplied FIR filter is a high-cut filter with a cutoff frequency of 50 Hz for 500 Hz. To change the frequency, create a new FIR filter file.
- - A file is created every minute (RTC based) and acceleration data is written to the file every 15 seconds (clock based). Due to the different counting bases, it rarely happens that one file contains 45 secondof data and the next file contains 75 seconds of data.
+ - A file is created every minute (RTC-based) and acceleration data is written to the file every 15 seconds (clock-based). Due to the different counting bases, it rarely happens that one file contains 45 secondof data and the next file contains 75 seconds of data.
  - A "[hat](3D_model/hat.stl)" is recommended for outdoor use.
    - [x] Blocks sunlight and protects the LCD.
    - [x] Falling volcanic ash is washed away by rain.
