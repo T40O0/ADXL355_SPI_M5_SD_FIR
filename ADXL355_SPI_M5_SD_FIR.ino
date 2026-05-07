@@ -165,50 +165,54 @@ void createFile() {
 // [U4 削除] tryNtpSync (タイムアウト版) は元のハング動作に戻すため削除
 
 // [U2/Set_RTC 共通] 設定後の確認画面 (10 秒表示、RTC と ESP32 内部時計を比較)
-//      フォント大きめで読みやすく改善
+//      [改善] fillRect を廃止 → ちらつき解消
+//             ラベルは初回のみ描画。値はフォント背景色で上書き(同じ幅なので残骸なし)。
+//             カウントダウンは秒が変わった時だけ再描画。
 static void rtcConfirmScreen() {
   static constexpr const char* const wd[7] = {"Sun","Mon","Tue","Wed","Thr","Fri","Sat"};
+
+  // 初回: 全画面塗りつぶし + 静的ラベル描画
   M5.Lcd.fillScreen(WHITE);
+  M5.Lcd.setTextColor(BLACK, WHITE);
+  M5.Lcd.setTextFont(2);
+  M5.Lcd.setCursor(0, 0);
+  M5.Lcd.print("RTC time:");
+  M5.Lcd.setCursor(0, 90);
+  M5.Lcd.print("ESP32 time:");
+
+  int prevSec = -1;
   for (int i = 100; i > 0; --i) {
     delay(100);
     auto rtcDt = M5.Rtc.getDateTime();
     auto sysT  = time(nullptr);
     auto sysTm = localtime(&sysT);
 
-    // RTC 時刻 (font 4)
-    M5.Lcd.setTextFont(2);
-    M5.Lcd.setTextColor(BLACK, WHITE);
-    M5.Lcd.setCursor(0, 0);
-    M5.Lcd.print("RTC time:");
+    // RTC 時刻 (font 4 で大表示、固定幅フォーマット)
     M5.Lcd.setTextFont(4);
-    M5.Lcd.fillRect(0, 18, 320, 30, WHITE);
+    M5.Lcd.setTextColor(BLACK, WHITE);   // 文字背景を WHITE に → fillRect 不要
     M5.Lcd.setCursor(0, 18);
     M5.Lcd.printf("%04d/%02d/%02d (%s)",
                   rtcDt.date.year, rtcDt.date.month, rtcDt.date.date, wd[rtcDt.date.weekDay]);
-    M5.Lcd.fillRect(0, 50, 320, 30, WHITE);
     M5.Lcd.setCursor(0, 50);
     M5.Lcd.printf("%02d:%02d:%02d",
                   rtcDt.time.hours, rtcDt.time.minutes, rtcDt.time.seconds);
 
-    // ESP32 内部時計 (font 4)
-    M5.Lcd.setTextFont(2);
-    M5.Lcd.setCursor(0, 90);
-    M5.Lcd.print("ESP32 time:");
-    M5.Lcd.setTextFont(4);
-    M5.Lcd.fillRect(0, 108, 320, 30, WHITE);
+    // ESP32 内部時計
     M5.Lcd.setCursor(0, 108);
     M5.Lcd.printf("%04d/%02d/%02d (%s)",
                   sysTm->tm_year+1900, sysTm->tm_mon+1, sysTm->tm_mday, wd[sysTm->tm_wday]);
-    M5.Lcd.fillRect(0, 140, 320, 30, WHITE);
     M5.Lcd.setCursor(0, 140);
     M5.Lcd.printf("%02d:%02d:%02d",
                   sysTm->tm_hour, sysTm->tm_min, sysTm->tm_sec);
 
-    // カウントダウン (font 2)
-    M5.Lcd.setTextFont(2);
-    M5.Lcd.fillRect(0, 200, 320, 20, WHITE);
-    M5.Lcd.setCursor(0, 200);
-    M5.Lcd.printf("Measurement starts in %d sec", i / 10);
+    // カウントダウン: 秒が変わった時だけ再描画 (10 ループに 1 回)
+    int sec = i / 10;
+    if (sec != prevSec) {
+      M5.Lcd.setTextFont(2);
+      M5.Lcd.setCursor(0, 200);
+      M5.Lcd.printf("Measurement starts in %2d sec", sec);
+      prevSec = sec;
+    }
   }
 }
 
@@ -261,15 +265,24 @@ void Set_RTC() {
 }
 //==============================================================================
 void Set_WiFi(){
+  // [U1 改善] font 4 (1 行 ~22 文字まで) に明示設定 + 文字列を 2 行ずつに分割
   M5.Lcd.fillScreen(WHITE);
-  M5.Lcd.setCursor(10, 10);
   M5.Lcd.setTextColor(BLACK, WHITE);
-  M5.Lcd.println("Use your phone to select Wi-Fi.");
+  M5.Lcd.setTextFont(4);
+
+  M5.Lcd.setCursor(0, 5);
+  M5.Lcd.println("Use your phone");
+  M5.Lcd.setCursor(0, 35);
+  M5.Lcd.println("to select Wi-Fi.");
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.beginSmartConfig();
-  M5.Lcd.setCursor(10, 30);
-  M5.Lcd.println("Waiting for SmartConfig.");
+
+  M5.Lcd.setCursor(0, 90);
+  M5.Lcd.println("Waiting for");
+  M5.Lcd.setCursor(0, 120);
+  M5.Lcd.println("SmartConfig...");
+
   while (!WiFi.smartConfigDone()) {
     delay(500);
   }
@@ -505,94 +518,134 @@ static void handleDownload() {
   f.close();
 }
 
-// [U3] ZIP ストリーミング本体: ファイルパスのリストを ZIP として送出
-//      無圧縮 (store) 形式。ZIP-32 (4GB 以下) 対応
-//      [U3 修正] httpSrv.sendContent() を使う (chunked encoding を WebServer に任せる)
-//                生 client.write() だと CONTENT_LENGTH_UNKNOWN 時の chunk フレーミングが
-//                付かず HTTP 不正でブラウザがエラー → DL 失敗する
-static void streamZip(const std::vector<String> &fullPaths, const std::vector<String> &archiveNames) {
+// [U3 修正] ZIP ストリーミング本体: 事前に Content-Length を計算し、生 client.write()
+//          で送る。ZIP は data descriptor 方式 (各ファイル 1 read で済む)
+//          無圧縮 (store) 形式、ZIP-32 (4GB 以下) 対応
+//
+//          ブラウザは Content-Length が確定しているので**進捗バーを表示**できる。
+//          chunked encoding を使わないので「0 byte/sec」現象も回避。
+static void streamZip(const String &zipName,
+                     const std::vector<String> &fullPaths,
+                     const std::vector<String> &archiveNames) {
   crc32Init();
+
+  // ---- Pass 1: 各ファイルのサイズ確認 (read 不要、f.size() のみ) ----
+  std::vector<uint32_t> sizes;
+  std::vector<bool>     valid;
+  uint32_t totalSize = 0;
+  uint32_t cdSize    = 0;
+  uint16_t entries   = 0;
+
+  for (size_t i = 0; i < fullPaths.size(); i++) {
+    File f = SD.open(fullPaths[i]);
+    bool ok = (f && !f.isDirectory());
+    valid.push_back(ok);
+    if (!ok) { sizes.push_back(0); if (f) f.close(); continue; }
+    uint32_t sz = f.size();
+    sizes.push_back(sz);
+    uint16_t namelen = archiveNames[i].length();
+    // 局所ヘッダ(30) + name + データ + データデスクリプタ(16)
+    totalSize += 30 + namelen + sz + 16;
+    cdSize    += 46 + namelen;
+    entries++;
+    f.close();
+  }
+  totalSize += cdSize + 22;   // + Central Directory 合計 + EOCD(22)
+
+  // ---- ヘッダ送信 (Content-Length 確定) ----
+  httpSrv.sendHeader("Content-Type", "application/zip");
+  httpSrv.sendHeader("Content-Disposition", "attachment; filename=\"" + zipName + "\"");
+  httpSrv.sendHeader("Connection", "close");
+  httpSrv.setContentLength(totalSize);
+  httpSrv.send(200, "application/zip", "");
+  WiFiClient client = httpSrv.client();
+
+  // ---- Pass 2: ZIP 本体ストリーミング (data descriptor 方式で 1 read/file) ----
   String centralDir;
-  centralDir.reserve(fullPaths.size() * 80);
+  centralDir.reserve(cdSize);
   uint32_t totalOffset = 0;
 
-  uint8_t hdr[46];
+  uint8_t hdr[30];
+  uint8_t dd[16];
   uint8_t buf[1024];
 
-  for (size_t idx = 0; idx < fullPaths.size(); idx++) {
-    File f = SD.open(fullPaths[idx]);
-    if (!f || f.isDirectory()) { if (f) f.close(); continue; }
-    uint32_t size = f.size();
+  for (size_t i = 0; i < fullPaths.size(); i++) {
+    if (!valid[i]) continue;
 
-    // CRC32 を計算 (ファイルを 1 周読む)
-    uint32_t crc = 0;
-    while (f.available()) {
-      int n = f.read(buf, sizeof(buf));
-      if (n <= 0) break;
-      crc = crc32Update(crc, buf, n);
-    }
-    f.seek(0);
+    const String &name = archiveNames[i];
+    uint16_t namelen = name.length();
+    uint32_t size = sizes[i];
 
-    const String &name = archiveNames[idx];
-    uint16_t nameLen = name.length();
-
-    // Local file header
+    // Local file header (CRC=0, sizes=0, flag bit 3 = data descriptor follows)
     memset(hdr, 0, 30);
-    hdr[0]=0x50; hdr[1]=0x4b; hdr[2]=0x03; hdr[3]=0x04;
-    hdr[4]=20;
-    hdr[12]=0x21;
-    hdr[14]= crc        & 0xFF; hdr[15]=(crc>>8)&0xFF; hdr[16]=(crc>>16)&0xFF; hdr[17]=(crc>>24)&0xFF;
-    hdr[18]= size       & 0xFF; hdr[19]=(size>>8)&0xFF; hdr[20]=(size>>16)&0xFF; hdr[21]=(size>>24)&0xFF;
-    hdr[22]= size       & 0xFF; hdr[23]=(size>>8)&0xFF; hdr[24]=(size>>16)&0xFF; hdr[25]=(size>>24)&0xFF;
-    hdr[26]= nameLen    & 0xFF; hdr[27]=(nameLen>>8)&0xFF;
-    httpSrv.sendContent((const char*)hdr, 30);
-    httpSrv.sendContent(name);
+    hdr[0]=0x50; hdr[1]=0x4b; hdr[2]=0x03; hdr[3]=0x04;   // signature
+    hdr[4]=20;                                              // version
+    hdr[6]=0x08;                                            // flag bit 3
+    hdr[12]=0x21;                                           // mod date placeholder
+    // CRC, sizes は 0 のまま (data descriptor で後出し)
+    hdr[26]= namelen & 0xFF; hdr[27]=(namelen>>8)&0xFF;
+    client.write(hdr, 30);
+    client.write((const uint8_t*)name.c_str(), namelen);
 
-    // ファイル本体ストリーミング
-    while (f.available()) {
-      int n = f.read(buf, sizeof(buf));
-      if (n <= 0) break;
-      httpSrv.sendContent((const char*)buf, n);
+    // ファイル本体: 読みつつ CRC32 計算 + 送信 (1 read のみ)
+    File f = SD.open(fullPaths[i]);
+    uint32_t crc = 0;
+    uint32_t remaining = size;
+    while (remaining > 0) {
+      uint32_t want = remaining > sizeof(buf) ? sizeof(buf) : remaining;
+      int n = f.read(buf, want);
+      if (n <= 0) {
+        // ファイルが Pass 1 時より短くなった場合: ゼロパディング (Content-Length 維持)
+        memset(buf, 0, want);
+        n = want;
+      }
+      crc = crc32Update(crc, buf, n);
+      client.write(buf, n);
+      remaining -= n;
     }
     f.close();
 
-    // Central directory entry をバッファ追記
+    // Data descriptor (signature + CRC + compressed size + uncompressed size = 16 byte)
+    dd[0]=0x50; dd[1]=0x4b; dd[2]=0x07; dd[3]=0x08;
+    dd[4]= crc       & 0xFF; dd[5]=(crc>>8)&0xFF; dd[6]=(crc>>16)&0xFF; dd[7]=(crc>>24)&0xFF;
+    dd[8]= size      & 0xFF; dd[9]=(size>>8)&0xFF; dd[10]=(size>>16)&0xFF; dd[11]=(size>>24)&0xFF;
+    dd[12]=size      & 0xFF; dd[13]=(size>>8)&0xFF; dd[14]=(size>>16)&0xFF; dd[15]=(size>>24)&0xFF;
+    client.write(dd, 16);
+
+    // Central directory entry (確定値で構築)
     uint8_t cd[46];
     memset(cd, 0, 46);
     cd[0]=0x50; cd[1]=0x4b; cd[2]=0x01; cd[3]=0x02;
     cd[4]=20; cd[6]=20;
+    cd[8]=0x08;                                       // flag bit 3
     cd[12]=0x21;
-    cd[16]= crc        & 0xFF; cd[17]=(crc>>8)&0xFF; cd[18]=(crc>>16)&0xFF; cd[19]=(crc>>24)&0xFF;
-    cd[20]= size       & 0xFF; cd[21]=(size>>8)&0xFF; cd[22]=(size>>16)&0xFF; cd[23]=(size>>24)&0xFF;
-    cd[24]= size       & 0xFF; cd[25]=(size>>8)&0xFF; cd[26]=(size>>16)&0xFF; cd[27]=(size>>24)&0xFF;
-    cd[28]= nameLen    & 0xFF; cd[29]=(nameLen>>8)&0xFF;
+    cd[16]= crc       & 0xFF; cd[17]=(crc>>8)&0xFF; cd[18]=(crc>>16)&0xFF; cd[19]=(crc>>24)&0xFF;
+    cd[20]= size      & 0xFF; cd[21]=(size>>8)&0xFF; cd[22]=(size>>16)&0xFF; cd[23]=(size>>24)&0xFF;
+    cd[24]= size      & 0xFF; cd[25]=(size>>8)&0xFF; cd[26]=(size>>16)&0xFF; cd[27]=(size>>24)&0xFF;
+    cd[28]= namelen   & 0xFF; cd[29]=(namelen>>8)&0xFF;
     cd[42]= totalOffset & 0xFF; cd[43]=(totalOffset>>8)&0xFF; cd[44]=(totalOffset>>16)&0xFF; cd[45]=(totalOffset>>24)&0xFF;
     centralDir.concat((const char*)cd, 46);
     centralDir.concat(name);
 
-    totalOffset += 30 + nameLen + size;
+    totalOffset += 30 + namelen + size + 16;
   }
 
-  // Central directory 全体を送信
-  uint32_t cdSize = centralDir.length();
+  // Central directory 送出
   uint32_t cdOffset = totalOffset;
-  if (cdSize > 0) {
-    httpSrv.sendContent(centralDir.c_str(), cdSize);
+  if (centralDir.length() > 0) {
+    client.write((const uint8_t*)centralDir.c_str(), centralDir.length());
   }
 
-  // End of Central Directory record
+  // End of Central Directory record (22 byte)
   uint8_t eocd[22];
   memset(eocd, 0, 22);
   eocd[0]=0x50; eocd[1]=0x4b; eocd[2]=0x05; eocd[3]=0x06;
-  uint16_t entries = (uint16_t)fullPaths.size();
-  eocd[8]=  entries  & 0xFF; eocd[9]=(entries>>8)&0xFF;
-  eocd[10]= entries  & 0xFF; eocd[11]=(entries>>8)&0xFF;
-  eocd[12]= cdSize   & 0xFF; eocd[13]=(cdSize>>8)&0xFF; eocd[14]=(cdSize>>16)&0xFF; eocd[15]=(cdSize>>24)&0xFF;
-  eocd[16]= cdOffset & 0xFF; eocd[17]=(cdOffset>>8)&0xFF; eocd[18]=(cdOffset>>16)&0xFF; eocd[19]=(cdOffset>>24)&0xFF;
-  httpSrv.sendContent((const char*)eocd, 22);
-
-  // chunked 終端 (空 chunk)
-  httpSrv.sendContent("");
+  eocd[8]=  entries & 0xFF; eocd[9]=(entries>>8)&0xFF;
+  eocd[10]= entries & 0xFF; eocd[11]=(entries>>8)&0xFF;
+  eocd[12]= cdSize  & 0xFF; eocd[13]=(cdSize>>8)&0xFF; eocd[14]=(cdSize>>16)&0xFF; eocd[15]=(cdSize>>24)&0xFF;
+  eocd[16]= cdOffset& 0xFF; eocd[17]=(cdOffset>>8)&0xFF; eocd[18]=(cdOffset>>16)&0xFF; eocd[19]=(cdOffset>>24)&0xFF;
+  client.write(eocd, 22);
+  client.flush();
 }
 
 // [U3] /zip?p=<folder>: 指定フォルダ内の全ファイルを ZIP で DL
@@ -602,27 +655,19 @@ static void handleZipFolder() {
 
   std::vector<String> files, dirs;
   listDir(p, files, dirs);
-  // フォルダ名を ZIP ファイル名に
   String zipName = p.substring(1) + ".zip";
 
   std::vector<String> fullPaths, archiveNames;
   for (auto &f : files) {
     fullPaths.push_back(p + "/" + f);
-    archiveNames.push_back(f);   // フォルダ名は付けず flat に格納
+    archiveNames.push_back(f);
   }
-
-  httpSrv.sendHeader("Content-Type", "application/zip");
-  httpSrv.sendHeader("Content-Disposition", "attachment; filename=\"" + zipName + "\"");
-  httpSrv.sendHeader("Connection", "close");
-  httpSrv.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  httpSrv.send(200, "application/zip", "");
-  streamZip(fullPaths, archiveNames);
+  streamZip(zipName, fullPaths, archiveNames);   // ヘッダ送信は streamZip 内で行う
 }
 
 // [U3] /zipall: SD ルート以下の全ファイルを再帰的に ZIP
 static void handleZipAll() {
   std::vector<String> fullPaths, archiveNames;
-  // ルートをスキャン
   std::vector<String> rootFiles, rootDirs;
   listDir("/", rootFiles, rootDirs);
   for (auto &f : rootFiles) {
@@ -634,16 +679,10 @@ static void handleZipAll() {
     listDir("/" + d, sub, subD);
     for (auto &f : sub) {
       fullPaths.push_back("/" + d + "/" + f);
-      archiveNames.push_back(d + "/" + f);   // フォルダ名込みで格納
+      archiveNames.push_back(d + "/" + f);
     }
   }
-
-  httpSrv.sendHeader("Content-Type", "application/zip");
-  httpSrv.sendHeader("Content-Disposition", "attachment; filename=\"all.zip\"");
-  httpSrv.sendHeader("Connection", "close");
-  httpSrv.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  httpSrv.send(200, "application/zip", "");
-  streamZip(fullPaths, archiveNames);
+  streamZip("all.zip", fullPaths, archiveNames);
 }
 
 // [U3] Data Dump モード: SoftAP + HTTP サーバ
@@ -757,8 +796,16 @@ void setup() {
   }
   M5.Lcd.setTextColor(BLACK, WHITE);
 
+  // [U1 改善] 静的なヘッダはループ前に 1 回だけ描画 (ちらつき防止)
+  M5.Lcd.setTextFont(4);
+  M5.Lcd.setTextColor(BLACK, WHITE);
+  M5.Lcd.setCursor(0, 5);
+  M5.Lcd.print("Tap a button:");
+
   // 30 秒カウントダウン (タップ無しでスキップ)
   // [B7] 300 ループ x 100ms = 30 秒
+  // [改善] 秒が変わった時だけカウントダウン表示を更新 (ちらつき解消)
+  int prevSec = -1;
   for (int i = 300; i > 0; --i) {
     M5.update();
     auto td = M5.Touch.getDetail();
@@ -781,14 +828,15 @@ void setup() {
     }
     if (dispatched) break;
 
-    // [U1 改善] font 4 で大きく表示。ヘッダ "Tap a button:" は上部、カウントダウンは下部
-    M5.Lcd.setTextFont(4);
-    M5.Lcd.setTextColor(BLACK, WHITE);
-    M5.Lcd.setCursor(0, 5);
-    M5.Lcd.print("Tap a button:");
-    M5.Lcd.fillRect(0, 215, 320, 25, WHITE);   // 下端の数字エリアをクリアしてから描画
-    M5.Lcd.setCursor(0, 215);
-    M5.Lcd.printf("Wait... %3d sec", i / 10);
+    int sec = i / 10;
+    if (sec != prevSec) {
+      // フォント背景色 (WHITE) で上書き → fillRect 不要 → ちらつかない
+      M5.Lcd.setTextFont(4);
+      M5.Lcd.setTextColor(BLACK, WHITE);
+      M5.Lcd.setCursor(0, 215);
+      M5.Lcd.printf("Wait... %2d sec", sec);
+      prevSec = sec;
+    }
     delay(100);
   }
   //==============================================================================
