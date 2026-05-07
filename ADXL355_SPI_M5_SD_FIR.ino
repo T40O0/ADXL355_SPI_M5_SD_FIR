@@ -2,9 +2,8 @@
 #include <M5Unified.h>
 #include <M5_ADXL355.h>
 
-// HTTP file server for the Data Dump mode.
-#include <WebServer.h>
-#include <vector>
+// Self-contained minimal FTP server for the Data Dump mode.
+// Uses only WiFi.h (WiFiServer/WiFiClient) - no external library.
 
 //==============================================================================
 // for RTC
@@ -121,28 +120,10 @@ void TaskSave( void *pvParameters );
 // queue
 xQueueHandle xQueue;
 
-// HTTP server instance (port 80, used by the Data Dump mode).
-WebServer httpSrv(80);
-
-// CRC32 table for ZIP, built at startup.
-static uint32_t crc32Table[256];
-static bool crc32TableReady = false;
-static void crc32Init() {
-  if (crc32TableReady) return;
-  for (int i = 0; i < 256; i++) {
-    uint32_t c = i;
-    for (int j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-    crc32Table[i] = c;
-  }
-  crc32TableReady = true;
-}
-//==============================================================================
-
-static uint32_t crc32Update(uint32_t crc, const uint8_t *data, size_t len) {
-  crc = ~crc;
-  while (len--) crc = crc32Table[(crc ^ *data++) & 0xFF] ^ (crc >> 8);
-  return ~crc;
-}
+// FTP server state (Data Dump mode). See MiniFTP definitions below.
+WiFiServer ftpCtrlSrv(21);
+WiFiServer ftpDataSrv(50000);
+static const uint16_t FTP_PASV_PORT = 50000;
 
 //==============================================================================
 
@@ -458,270 +439,197 @@ void Manual_Set() {
 
 //==============================================================================
 
-// Lists files and directories under the given path.
-static void listDir(const String &path,
-                    std::vector<String> &outFiles,
-                    std::vector<String> &outDirs,
-                    std::vector<uint32_t> *outSizes = nullptr) {
-  File dir = SD.open(path);
-  if (!dir || !dir.isDirectory()) return;
-  while (true) {
-    File entry = dir.openNextFile();
-    if (!entry) break;
-    String name = entry.name();
-    int slash = name.lastIndexOf('/');
-    if (slash >= 0) name = name.substring(slash + 1);
-    if (entry.isDirectory()) {
-      outDirs.push_back(name);
+// MiniFTP state (control connection, current cwd, auth flag, login arg).
+static WiFiClient ftpCli;
+static String    ftpCwd     = "/";
+static bool      ftpAuthed  = false;
+static String    ftpUserArg;
+static IPAddress ftpLocalIP;
+
+static const char *FTP_USER = "m5";
+static const char *FTP_PASS = "m5";
+
+// Resolve an FTP path argument relative to ftpCwd.
+static String ftpResolve(const String &arg) {
+  if (arg.length() == 0) return ftpCwd;
+  if (arg.startsWith("/")) return arg;
+  if (ftpCwd == "/") return "/" + arg;
+  return ftpCwd + "/" + arg;
+}
+
+// Send a code+message line on the FTP control connection.
+static void ftpReply(int code, const char *msg) {
+  ftpCli.printf("%d %s\r\n", code, msg);
+}
+
+// Wait for a passive-mode data client to connect (timeout in ms).
+static WiFiClient ftpAcceptData(uint32_t timeoutMs = 5000) {
+  uint32_t t0 = millis();
+  while (millis() - t0 < timeoutMs) {
+    WiFiClient c = ftpDataSrv.accept();
+    if (c) return c;
+    delay(10);
+  }
+  return WiFiClient();
+}
+//==============================================================================
+
+// Handle a single command line received on the FTP control connection.
+static void ftpHandleCmd(const String &line) {
+  int sp = line.indexOf(' ');
+  String cmd = (sp == -1) ? line : line.substring(0, sp);
+  String arg = (sp == -1) ? ""   : line.substring(sp + 1);
+  cmd.toUpperCase();
+  arg.trim();
+  Serial.printf("FTP> %s %s\n", cmd.c_str(), arg.c_str());
+
+  if (cmd == "USER") {
+    ftpUserArg = arg;
+    ftpReply(331, "Need password");
+  } else if (cmd == "PASS") {
+    if (ftpUserArg == FTP_USER && arg == FTP_PASS) {
+      ftpAuthed = true;
+      ftpReply(230, "Logged in");
     } else {
-      outFiles.push_back(name);
-      if (outSizes) outSizes->push_back((uint32_t)entry.size());
+      ftpReply(530, "Login incorrect");
     }
-    entry.close();
-  }
-  dir.close();
-}
-//==============================================================================
-
-static void handleRoot() {
-  std::vector<String> files, dirs;
-  listDir("/", files, dirs);
-
-  String html;
-  html.reserve(8192);
-  html  = F("<!doctype html><html><head><meta charset=\"utf-8\"><title>M5-SEISMO Data</title>");
-  html += F("<style>body{font-family:sans-serif;margin:20px}a{text-decoration:none}li{margin:4px 0}</style></head><body>");
-  html += F("<h1>M5-SEISMO Data Server</h1>");
-  html += F("<p><a href=\"/zipall\">[Download ALL as ZIP]</a></p>");
-  html += F("<h2>Folders</h2><ul>");
-  for (auto &d : dirs) {
-    html += "<li><a href=\"/folder?p=/" + d + "\">" + d + "/</a> ";
-    html += "[<a href=\"/zip?p=/" + d + "\">ZIP</a>]</li>";
-  }
-  html += F("</ul><h2>Files (root)</h2><ul>");
-  for (auto &f : files) {
-    html += "<li><a href=\"/dl?p=/" + f + "\">" + f + "</a></li>";
-  }
-  html += F("</ul></body></html>");
-  httpSrv.send(200, "text/html; charset=utf-8", html);
-}
-//==============================================================================
-
-static void handleFolder() {
-  String p = httpSrv.arg("p");
-  if (p.length() == 0 || p[0] != '/') { httpSrv.send(400, "text/plain", "bad path"); return; }
-  std::vector<String> files, dirs;
-  listDir(p, files, dirs);
-
-  String html;
-  html.reserve(16384);
-  html  = F("<!doctype html><html><head><meta charset=\"utf-8\"><title>");
-  html += p;
-  html += F("</title></head><body>");
-  html += "<h1>" + p + "</h1>";
-  html += "<p><a href=\"/\">&larr; Back</a> &nbsp; <a href=\"/zip?p=" + p + "\">[Download this folder as ZIP]</a></p>";
-  html += F("<ul>");
-  for (auto &f : files) {
-    html += "<li><a href=\"/dl?p=" + p + "/" + f + "\">" + f + "</a></li>";
-  }
-  html += F("</ul></body></html>");
-  httpSrv.send(200, "text/html; charset=utf-8", html);
-}
-//==============================================================================
-
-static void handleDownload() {
-  String p = httpSrv.arg("p");
-  if (p.length() == 0 || p[0] != '/') { httpSrv.send(400, "text/plain", "bad path"); return; }
-  File f = SD.open(p);
-  if (!f || f.isDirectory()) { httpSrv.send(404, "text/plain", "not found"); if (f) f.close(); return; }
-  int slash = p.lastIndexOf('/');
-  String fname = (slash >= 0) ? p.substring(slash + 1) : p;
-  httpSrv.sendHeader("Content-Disposition", "attachment; filename=\"" + fname + "\"");
-  httpSrv.streamFile(f, "text/csv");
-  f.close();
-}
-//==============================================================================
-
-// Streams a ZIP archive of the given files.
-static void streamZip(const String &zipName,
-                     const std::vector<String> &fullPaths,
-                     const std::vector<String> &archiveNames,
-                     const std::vector<uint32_t> &sizes) {
-  crc32Init();
-
-  uint32_t totalSize = 0;
-  uint32_t cdSize    = 0;
-  uint16_t entries   = 0;
-  for (size_t i = 0; i < fullPaths.size(); i++) {
-    uint16_t namelen = archiveNames[i].length();
-    totalSize += 30 + namelen + sizes[i];   // local hdr + name + data (no data descriptor)
-    cdSize    += 46 + namelen;
-    entries++;
-  }
-  totalSize += cdSize + 22;
-  Serial.printf("ZIP: %u entries, total %u bytes\n", entries, totalSize);
-
-  // Traditional ZIP format: CRC and sizes are written inline in the local
-  // file header (no data descriptor / no flag bit 3). Each entry is
-  // self-contained, which lets streaming download managers mark the
-  // download complete as soon as Content-Length bytes arrive.
-  //
-  // Mirror the streamFile() flow: only set Content-Disposition and
-  // Content-Length, then let httpSrv.sendContent() do the writes.
-  // No explicit Connection: close, no client.stop()/flush(); the
-  // WebServer manages the connection lifecycle.
-  httpSrv.sendHeader("Content-Disposition", "attachment; filename=\"" + zipName + "\"");
-  httpSrv.setContentLength(totalSize);
-  httpSrv.send(200, "application/zip", "");
-
-  String centralDir;
-  centralDir.reserve(cdSize);
-  uint32_t totalOffset = 0;
-
-  for (size_t i = 0; i < fullPaths.size(); i++) {
-    const String &name = archiveNames[i];
-    uint16_t namelen = name.length();
-    uint32_t size = sizes[i];
-
-    // Per-file buffer: hdr (30) + name + data
-    size_t bufSize = 30 + namelen + size;
-    uint8_t *fb = (uint8_t*)ps_malloc(bufSize);
-    if (!fb) {
-      Serial.printf("ZIP: ps_malloc(%u) failed for entry %u\n", (unsigned)bufSize, (unsigned)i);
-      // Last-resort fallback: emit zeros so Content-Length stays consistent
-      uint8_t zero[256] = {0};
-      size_t left = bufSize;
-      while (left > 0) {
-        size_t w = left > sizeof(zero) ? sizeof(zero) : left;
-        client.write(zero, w);
-        left -= w;
-      }
-      totalOffset += bufSize;
-      continue;
-    }
-
-    // Read file data into the buffer at offset (30 + namelen) and CRC32 it.
-    File f = SD.open(fullPaths[i]);
-    uint32_t crc = 0;
-    uint32_t pos = 30 + namelen;
-    uint32_t remaining = size;
-    while (remaining > 0) {
-      uint32_t want = remaining > 4096 ? 4096 : remaining;
-      int n = f ? f.read(fb + pos, want) : 0;
-      if (n <= 0) {
-        memset(fb + pos, 0, want);
-        n = want;
-      }
-      crc = crc32Update(crc, fb + pos, n);
-      pos += n;
-      remaining -= n;
+  } else if (!ftpAuthed) {
+    ftpReply(530, "Not logged in");
+  } else if (cmd == "SYST") {
+    ftpReply(215, "UNIX Type: L8");
+  } else if (cmd == "FEAT") {
+    ftpCli.println("211-Features:");
+    ftpCli.println(" PASV");
+    ftpCli.println(" SIZE");
+    ftpCli.println(" UTF8");
+    ftpCli.println("211 End");
+  } else if (cmd == "OPTS") {
+    ftpReply(200, "OK");
+  } else if (cmd == "TYPE") {
+    ftpReply(200, "Type set");
+  } else if (cmd == "PWD" || cmd == "XPWD") {
+    ftpCli.printf("257 \"%s\" is current directory\r\n", ftpCwd.c_str());
+  } else if (cmd == "CWD") {
+    String np = ftpResolve(arg);
+    File f = SD.open(np);
+    if (f && f.isDirectory()) {
+      ftpCwd = np;
+      ftpReply(250, "Directory changed");
+    } else {
+      ftpReply(550, "Directory not found");
     }
     if (f) f.close();
-
-    // Local file header (with actual CRC and sizes; flag = 0).
-    memset(fb, 0, 30);
-    fb[0]=0x50; fb[1]=0x4b; fb[2]=0x03; fb[3]=0x04;
-    fb[4]=20;                                  // version needed
-    // fb[6..7] = flag = 0 (no data descriptor)
-    // fb[8..9] = method = 0 (store)
-    fb[12]=0x21;                                // mod date placeholder
-    fb[14]= crc       & 0xFF; fb[15]=(crc>>8)&0xFF; fb[16]=(crc>>16)&0xFF; fb[17]=(crc>>24)&0xFF;
-    fb[18]= size      & 0xFF; fb[19]=(size>>8)&0xFF; fb[20]=(size>>16)&0xFF; fb[21]=(size>>24)&0xFF;
-    fb[22]= size      & 0xFF; fb[23]=(size>>8)&0xFF; fb[24]=(size>>16)&0xFF; fb[25]=(size>>24)&0xFF;
-    fb[26]= namelen   & 0xFF; fb[27]=(namelen>>8)&0xFF;
-    memcpy(fb + 30, name.c_str(), namelen);
-
-    // One single send for the entire file entry.
-    httpSrv.sendContent((const char*)fb, bufSize);
-    free(fb);
-
-    // Central directory entry (mirrors the local header, flag = 0).
-    uint8_t cd[46];
-    memset(cd, 0, 46);
-    cd[0]=0x50; cd[1]=0x4b; cd[2]=0x01; cd[3]=0x02;
-    cd[4]=20; cd[6]=20;
-    // cd[8..9] = flag = 0
-    cd[12]=0x21;
-    cd[16]= crc       & 0xFF; cd[17]=(crc>>8)&0xFF; cd[18]=(crc>>16)&0xFF; cd[19]=(crc>>24)&0xFF;
-    cd[20]= size      & 0xFF; cd[21]=(size>>8)&0xFF; cd[22]=(size>>16)&0xFF; cd[23]=(size>>24)&0xFF;
-    cd[24]= size      & 0xFF; cd[25]=(size>>8)&0xFF; cd[26]=(size>>16)&0xFF; cd[27]=(size>>24)&0xFF;
-    cd[28]= namelen   & 0xFF; cd[29]=(namelen>>8)&0xFF;
-    cd[42]= totalOffset & 0xFF; cd[43]=(totalOffset>>8)&0xFF; cd[44]=(totalOffset>>16)&0xFF; cd[45]=(totalOffset>>24)&0xFF;
-    centralDir.concat((const char*)cd, 46);
-    centralDir.concat(name);
-
-    totalOffset += bufSize;
+  } else if (cmd == "CDUP") {
+    int sl = ftpCwd.lastIndexOf('/');
+    if (sl > 0) ftpCwd = ftpCwd.substring(0, sl);
+    else        ftpCwd = "/";
+    ftpReply(200, "Up");
+  } else if (cmd == "PASV") {
+    // Make sure the data server is listening on the fixed PASV port.
+    ftpDataSrv.begin();
+    uint8_t pH = (FTP_PASV_PORT >> 8) & 0xff;
+    uint8_t pL = FTP_PASV_PORT & 0xff;
+    ftpCli.printf("227 Entering Passive Mode (%u,%u,%u,%u,%u,%u)\r\n",
+                  ftpLocalIP[0], ftpLocalIP[1], ftpLocalIP[2], ftpLocalIP[3],
+                  pH, pL);
+  } else if (cmd == "LIST" || cmd == "NLST") {
+    ftpReply(150, "Opening data connection");
+    WiFiClient dc = ftpAcceptData();
+    if (!dc) { ftpReply(425, "Can't open data connection"); return; }
+    bool namesOnly = (cmd == "NLST");
+    File dir = SD.open(ftpCwd);
+    if (dir && dir.isDirectory()) {
+      while (true) {
+        File entry = dir.openNextFile();
+        if (!entry) break;
+        String name = entry.name();
+        int sl = name.lastIndexOf('/');
+        if (sl >= 0) name = name.substring(sl + 1);
+        if (namesOnly) {
+          dc.printf("%s\r\n", name.c_str());
+        } else {
+          // UNIX-style ls -l output (Explorer parses this format).
+          const char *mode = entry.isDirectory() ? "drwxr-xr-x" : "-rw-r--r--";
+          dc.printf("%s 1 m5 m5 %u Jan 01  2026 %s\r\n",
+                    mode, (unsigned)entry.size(), name.c_str());
+        }
+        entry.close();
+      }
+      dir.close();
+    }
+    dc.stop();
+    ftpReply(226, "Transfer complete");
+  } else if (cmd == "RETR") {
+    String path = ftpResolve(arg);
+    File f = SD.open(path);
+    if (!f || f.isDirectory()) {
+      ftpReply(550, "File not found");
+      if (f) f.close();
+      return;
+    }
+    ftpReply(150, "Opening data connection");
+    WiFiClient dc = ftpAcceptData();
+    if (!dc) { ftpReply(425, "Can't open data connection"); f.close(); return; }
+    uint8_t buf[1460];
+    while (f.available()) {
+      int n = f.read(buf, sizeof(buf));
+      if (n <= 0) break;
+      dc.write(buf, n);
+    }
+    f.close();
+    dc.stop();
+    ftpReply(226, "Transfer complete");
+  } else if (cmd == "SIZE") {
+    String path = ftpResolve(arg);
+    File f = SD.open(path);
+    if (f && !f.isDirectory()) {
+      ftpCli.printf("213 %u\r\n", (unsigned)f.size());
+    } else {
+      ftpReply(550, "Not found");
+    }
+    if (f) f.close();
+  } else if (cmd == "NOOP") {
+    ftpReply(200, "OK");
+  } else if (cmd == "QUIT") {
+    ftpReply(221, "Bye");
+    ftpCli.stop();
+  } else {
+    ftpReply(502, "Not implemented");
   }
-
-  uint32_t cdOffset = totalOffset;
-  if (centralDir.length() > 0) {
-    httpSrv.sendContent(centralDir.c_str(), centralDir.length());
-  }
-
-  // End of Central Directory record (22 byte)
-  uint8_t eocd[22];
-  memset(eocd, 0, 22);
-  eocd[0]=0x50; eocd[1]=0x4b; eocd[2]=0x05; eocd[3]=0x06;
-  eocd[8]=  entries & 0xFF; eocd[9]=(entries>>8)&0xFF;
-  eocd[10]= entries & 0xFF; eocd[11]=(entries>>8)&0xFF;
-  eocd[12]= cdSize  & 0xFF; eocd[13]=(cdSize>>8)&0xFF; eocd[14]=(cdSize>>16)&0xFF; eocd[15]=(cdSize>>24)&0xFF;
-  eocd[16]= cdOffset& 0xFF; eocd[17]=(cdOffset>>8)&0xFF; eocd[18]=(cdOffset>>16)&0xFF; eocd[19]=(cdOffset>>24)&0xFF;
-  httpSrv.sendContent((const char*)eocd, 22);
 }
 //==============================================================================
 
-static void handleZipFolder() {
-  String p = httpSrv.arg("p");
-  if (p.length() == 0 || p[0] != '/') { httpSrv.send(400, "text/plain", "bad path"); return; }
-
-  std::vector<String> files, dirs;
-  std::vector<uint32_t> sizes;
-  listDir(p, files, dirs, &sizes);
-  String zipName = p.substring(1) + ".zip";
-
-  std::vector<String> fullPaths, archiveNames;
-  for (auto &f : files) {
-    fullPaths.push_back(p + "/" + f);
-    archiveNames.push_back(f);
+// Process pending FTP control activity. Call repeatedly from the main loop.
+static void ftpHandle() {
+  if (!ftpCli || !ftpCli.connected()) {
+    WiFiClient incoming = ftpCtrlSrv.accept();
+    if (incoming) {
+      ftpCli = incoming;
+      ftpAuthed = false;
+      ftpCwd    = "/";
+      ftpReply(220, "M5 FTP Ready");
+    }
+    return;
   }
-  streamZip(zipName, fullPaths, archiveNames, sizes);
-}
-//==============================================================================
-
-static void handleZipAll() {
-  std::vector<String> fullPaths, archiveNames;
-  std::vector<uint32_t> sizes;
-
-  std::vector<String> rootFiles, rootDirs;
-  std::vector<uint32_t> rootSizes;
-  listDir("/", rootFiles, rootDirs, &rootSizes);
-  for (size_t i = 0; i < rootFiles.size(); i++) {
-    fullPaths.push_back("/" + rootFiles[i]);
-    archiveNames.push_back(rootFiles[i]);
-    sizes.push_back(rootSizes[i]);
-  }
-  for (auto &d : rootDirs) {
-    std::vector<String> sub, subD;
-    std::vector<uint32_t> subSizes;
-    listDir("/" + d, sub, subD, &subSizes);
-    for (size_t i = 0; i < sub.size(); i++) {
-      fullPaths.push_back("/" + d + "/" + sub[i]);
-      archiveNames.push_back(d + "/" + sub[i]);
-      sizes.push_back(subSizes[i]);
+  if (ftpCli.available()) {
+    String line = ftpCli.readStringUntil('\n');
+    line.trim();
+    if (line.length() > 0) {
+      ftpHandleCmd(line);
     }
   }
-  streamZip("all.zip", fullPaths, archiveNames, sizes);
 }
 //==============================================================================
 
-// Data Dump mode: SoftAP + HTTP server.
-// Open http://192.168.4.1 in a browser for file listing,
-void Data_Dump_HTTP() {
+// Data Dump mode: SoftAP + minimal FTP server.
+// Connect Wi-Fi to "M5-SEISMO" (m5seismo) and open
+// ftp://192.168.4.1 in Windows Explorer (user m5 / pass m5).
+void Data_Dump_FTP() {
   M5.Lcd.fillScreen(BLACK);
   M5.Lcd.setTextColor(WHITE, BLACK);
   M5.Lcd.setCursor(0, 0);
   M5.Lcd.setTextFont(2);
-  M5.Lcd.println("Data Dump (AP+HTTP)");
+  M5.Lcd.println("Data Dump (AP+FTP)");
   M5.Lcd.println();
 
   M5.Lcd.print("Init SD...");
@@ -739,28 +647,25 @@ void Data_Dump_HTTP() {
   }
   M5.Lcd.println(" OK");
 
-  // Start the SoftAP.
   WiFi.mode(WIFI_AP);
   IPAddress apIP(192, 168, 4, 1);
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
   WiFi.softAP("M5-SEISMO", "m5seismo");
 
-  // WebServer routes.
-  httpSrv.on("/",       handleRoot);
-  httpSrv.on("/folder", handleFolder);
-  httpSrv.on("/dl",     handleDownload);
-  httpSrv.on("/zip",    handleZipFolder);
-  httpSrv.on("/zipall", handleZipAll);
-  httpSrv.begin();
+  ftpLocalIP = apIP;
+  ftpCtrlSrv.begin();
+  ftpDataSrv.begin();
+  ftpAuthed = false;
+  ftpCwd    = "/";
 
   M5.Lcd.printf("SSID: M5-SEISMO\n");
   M5.Lcd.printf("PASS: m5seismo\n");
   M5.Lcd.println();
-  M5.Lcd.printf("Open in browser:\n");
-  M5.Lcd.println("http://192.168.4.1");
+  M5.Lcd.printf("URL : ftp://192.168.4.1\n");
+  M5.Lcd.printf("User: m5 / Pass: m5\n");
   M5.Lcd.println();
-  M5.Lcd.println("[Download ALL as ZIP]");
-  M5.Lcd.println("for full backup.");
+  M5.Lcd.println("Open in Explorer:");
+  M5.Lcd.println("ftp://m5:m5@192.168.4.1");
 
   const int rbX = 60, rbY = 190, rbW = 200, rbH = 40;
   M5.Lcd.fillRoundRect(rbX,     rbY,     rbW,     rbH,     8, RED);
@@ -771,13 +676,12 @@ void Data_Dump_HTTP() {
   M5.Lcd.print("Reset");
 
   while (true) {
-    httpSrv.handleClient();
+    ftpHandle();
     M5.update();
     auto td = M5.Touch.getDetail();
     if (td.wasPressed()) {
       if (td.x >= rbX && td.x <= rbX + rbW &&
           td.y >= rbY && td.y <= rbY + rbH) {
-        // Reset tapped: restart and enter normal measurement mode.
         M5.Lcd.fillScreen(BLACK);
         M5.Lcd.setTextFont(4);
         M5.Lcd.setTextColor(WHITE, BLACK);
@@ -854,7 +758,7 @@ void setup() {
             case 0: Set_WiFi();      break;
             case 1: Set_RTC();       break;
             case 2: Manual_Set();    break;
-            case 3: Data_Dump_HTTP(); break;
+            case 3: Data_Dump_FTP(); break;
           }
           dispatched = true;
           break;
