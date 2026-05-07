@@ -147,17 +147,51 @@ void createPath() {
 }
 //==============================================================================
 
+// [B11] SD オープン失敗時の再試行ヘルパー
+//       一時的な接触不良/書き込み遅延を吸収するため、永久 while(1) ;の代わりに
+//       1 秒間隔でリトライ + 30 回ごとに SD 再マウント。
+//       LCD/Serial に「SD ERROR retry=N」を表示してユーザに気づかせる。
+//       戻り値は必ずオープン済みの File (失敗ループは無限に続く)。
+static File openSDFileSafe(const char *path, const char *mode) {
+  File f;
+  uint32_t retry = 0;
+  while (true) {
+    f = SD.open(path, mode);
+    if (f) {
+      if (retry > 0) {
+        Serial.printf("SD recovered after %u retries\n", retry);
+      }
+      return f;
+    }
+    retry++;
+    Serial.printf("SD open '%s' failed, retry %u\n", path, retry);
+    M5.Lcd.fillRect(0, 200, 320, 40, RED);
+    M5.Lcd.setTextFont(2);
+    M5.Lcd.setTextColor(WHITE, RED);
+    M5.Lcd.setCursor(0, 200);
+    M5.Lcd.printf("SD ERROR retry=%u", (unsigned)retry);
+    M5.Lcd.setCursor(0, 220);
+    M5.Lcd.print("Check SD card!");
+    delay(1000);
+    // 30 秒ごとに SD を再マウント (ホットプラグ復帰対応)
+    if (retry % 30 == 0) {
+      Serial.println("Remounting SD...");
+      SD.end();
+      delay(500);
+      SD.begin(GPIO_NUM_4, SPI, 10000000);
+    }
+  }
+}
+//==============================================================================
+
 void createFile() {
   fileDateTime = dt.time.minutes; //Create a file every minute
   sprintf(fileName, "%s/%02d%02d.csv",
           filePath,
           dt.time.hours,
           fileDateTime);
-  f = SD.open(fileName, FILE_WRITE);
-  if (!f) {
-    Serial.print("ERROR: Can't open the file");
-    while (1) ;    // [B11] 既知の永久ハング(本修正対象外)
-  }
+  // [B11] 旧 while(1) を openSDFileSafe で置換: 一時的 SD 障害でハングしない
+  f = openSDFileSafe(fileName, FILE_WRITE);
   f.println(accHeader);
 }
 //==============================================================================
@@ -441,18 +475,26 @@ void Manual_Set() {
 
 // [U3] HTTP 経由でファイル一覧を返すユーティリティ
 //      指定ディレクトリ内の名前を String 配列に集める (ファイルとディレクトリ別)
-static void listDir(const String &path, std::vector<String> &outFiles, std::vector<String> &outDirs) {
+//      [U3 修正] outSizes を渡せば、各ファイルのサイズも同時に収集する。
+//                ZIP 生成では事前のサイズ収集に使う(Pass1 の SD.open 連打を回避)。
+static void listDir(const String &path,
+                    std::vector<String> &outFiles,
+                    std::vector<String> &outDirs,
+                    std::vector<uint32_t> *outSizes = nullptr) {
   File dir = SD.open(path);
   if (!dir || !dir.isDirectory()) return;
   while (true) {
     File entry = dir.openNextFile();
     if (!entry) break;
     String name = entry.name();
-    // [U3] SD ライブラリは name に絶対パスを返す場合があるので basename だけ抽出
     int slash = name.lastIndexOf('/');
     if (slash >= 0) name = name.substring(slash + 1);
-    if (entry.isDirectory()) outDirs.push_back(name);
-    else                     outFiles.push_back(name);
+    if (entry.isDirectory()) {
+      outDirs.push_back(name);
+    } else {
+      outFiles.push_back(name);
+      if (outSizes) outSizes->push_back((uint32_t)entry.size());
+    }
     entry.close();
   }
   dir.close();
@@ -524,33 +566,28 @@ static void handleDownload() {
 //
 //          ブラウザは Content-Length が確定しているので**進捗バーを表示**できる。
 //          chunked encoding を使わないので「0 byte/sec」現象も回避。
+//
+//          [更に修正] sizes は呼び出し元から渡す。streamZip 内で SD.open() しない。
+//                    listDir の段階で entry.size() を取得済みなので追加 SD I/O 不要。
+//                    1440 ファイル時: 旧 Pass1 約 43 秒 → 0 秒(瞬時)
 static void streamZip(const String &zipName,
                      const std::vector<String> &fullPaths,
-                     const std::vector<String> &archiveNames) {
+                     const std::vector<String> &archiveNames,
+                     const std::vector<uint32_t> &sizes) {
   crc32Init();
 
-  // ---- Pass 1: 各ファイルのサイズ確認 (read 不要、f.size() のみ) ----
-  std::vector<uint32_t> sizes;
-  std::vector<bool>     valid;
+  // ---- ZIP 全体サイズを計算 (sizes は既知なので SD I/O 不要) ----
   uint32_t totalSize = 0;
   uint32_t cdSize    = 0;
   uint16_t entries   = 0;
-
   for (size_t i = 0; i < fullPaths.size(); i++) {
-    File f = SD.open(fullPaths[i]);
-    bool ok = (f && !f.isDirectory());
-    valid.push_back(ok);
-    if (!ok) { sizes.push_back(0); if (f) f.close(); continue; }
-    uint32_t sz = f.size();
-    sizes.push_back(sz);
     uint16_t namelen = archiveNames[i].length();
-    // 局所ヘッダ(30) + name + データ + データデスクリプタ(16)
-    totalSize += 30 + namelen + sz + 16;
+    totalSize += 30 + namelen + sizes[i] + 16;   // local hdr + name + data + dd
     cdSize    += 46 + namelen;
     entries++;
-    f.close();
   }
-  totalSize += cdSize + 22;   // + Central Directory 合計 + EOCD(22)
+  totalSize += cdSize + 22;
+  Serial.printf("ZIP: %u entries, total %u bytes\n", entries, totalSize);
 
   // ---- ヘッダ送信 (Content-Length 確定) ----
   httpSrv.sendHeader("Content-Type", "application/zip");
@@ -560,7 +597,7 @@ static void streamZip(const String &zipName,
   httpSrv.send(200, "application/zip", "");
   WiFiClient client = httpSrv.client();
 
-  // ---- Pass 2: ZIP 本体ストリーミング (data descriptor 方式で 1 read/file) ----
+  // ---- ZIP 本体ストリーミング (data descriptor 方式で 1 read/file) ----
   String centralDir;
   centralDir.reserve(cdSize);
   uint32_t totalOffset = 0;
@@ -570,8 +607,6 @@ static void streamZip(const String &zipName,
   uint8_t buf[1024];
 
   for (size_t i = 0; i < fullPaths.size(); i++) {
-    if (!valid[i]) continue;
-
     const String &name = archiveNames[i];
     uint16_t namelen = name.length();
     uint32_t size = sizes[i];
@@ -654,7 +689,8 @@ static void handleZipFolder() {
   if (p.length() == 0 || p[0] != '/') { httpSrv.send(400, "text/plain", "bad path"); return; }
 
   std::vector<String> files, dirs;
-  listDir(p, files, dirs);
+  std::vector<uint32_t> sizes;
+  listDir(p, files, dirs, &sizes);    // ★ サイズを listDir 段階で収集
   String zipName = p.substring(1) + ".zip";
 
   std::vector<String> fullPaths, archiveNames;
@@ -662,27 +698,35 @@ static void handleZipFolder() {
     fullPaths.push_back(p + "/" + f);
     archiveNames.push_back(f);
   }
-  streamZip(zipName, fullPaths, archiveNames);   // ヘッダ送信は streamZip 内で行う
+  streamZip(zipName, fullPaths, archiveNames, sizes);
 }
 
 // [U3] /zipall: SD ルート以下の全ファイルを再帰的に ZIP
 static void handleZipAll() {
   std::vector<String> fullPaths, archiveNames;
+  std::vector<uint32_t> sizes;
+
+  // ルート直下
   std::vector<String> rootFiles, rootDirs;
-  listDir("/", rootFiles, rootDirs);
-  for (auto &f : rootFiles) {
-    fullPaths.push_back("/" + f);
-    archiveNames.push_back(f);
+  std::vector<uint32_t> rootSizes;
+  listDir("/", rootFiles, rootDirs, &rootSizes);
+  for (size_t i = 0; i < rootFiles.size(); i++) {
+    fullPaths.push_back("/" + rootFiles[i]);
+    archiveNames.push_back(rootFiles[i]);
+    sizes.push_back(rootSizes[i]);
   }
+  // サブフォルダ (1 階層のみ、FIR の /YYYYMMDD/ 想定)
   for (auto &d : rootDirs) {
     std::vector<String> sub, subD;
-    listDir("/" + d, sub, subD);
-    for (auto &f : sub) {
-      fullPaths.push_back("/" + d + "/" + f);
-      archiveNames.push_back(d + "/" + f);
+    std::vector<uint32_t> subSizes;
+    listDir("/" + d, sub, subD, &subSizes);
+    for (size_t i = 0; i < sub.size(); i++) {
+      fullPaths.push_back("/" + d + "/" + sub[i]);
+      archiveNames.push_back(d + "/" + sub[i]);
+      sizes.push_back(subSizes[i]);
     }
   }
-  streamZip("all.zip", fullPaths, archiveNames);
+  streamZip("all.zip", fullPaths, archiveNames, sizes);
 }
 
 // [U3] Data Dump モード: SoftAP + HTTP サーバ
@@ -732,13 +776,36 @@ void Data_Dump_HTTP() {
   M5.Lcd.printf("Open in browser:\n");
   M5.Lcd.println("http://192.168.4.1");
   M5.Lcd.println();
-  M5.Lcd.println("Click [Download ALL as ZIP]");
+  M5.Lcd.println("[Download ALL as ZIP]");
   M5.Lcd.println("for full backup.");
-  M5.Lcd.println();
-  M5.Lcd.println("Reset M5 to exit.");
+
+  // [U3 追加] Reset ボタン (画面下部)
+  //          タップで ESP.restart() → 通常運用に戻る
+  const int rbX = 60, rbY = 190, rbW = 200, rbH = 40;
+  M5.Lcd.fillRoundRect(rbX,     rbY,     rbW,     rbH,     8, RED);
+  M5.Lcd.fillRoundRect(rbX + 4, rbY + 4, rbW - 8, rbH - 8, 8, ORANGE);
+  M5.Lcd.setTextFont(4);
+  M5.Lcd.setTextColor(BLACK, ORANGE);
+  M5.Lcd.setCursor(rbX + 70, rbY + 8);   // 中央寄せ気味
+  M5.Lcd.print("Reset");
 
   while (true) {
     httpSrv.handleClient();
+    M5.update();
+    auto td = M5.Touch.getDetail();
+    if (td.wasPressed()) {
+      if (td.x >= rbX && td.x <= rbX + rbW &&
+          td.y >= rbY && td.y <= rbY + rbH) {
+        // [U3] Reset ボタン押下 → 再起動して通常測定モードへ
+        M5.Lcd.fillScreen(BLACK);
+        M5.Lcd.setTextFont(4);
+        M5.Lcd.setTextColor(WHITE, BLACK);
+        M5.Lcd.setCursor(0, 100);
+        M5.Lcd.println("Restarting...");
+        delay(500);
+        ESP.restart();
+      }
+    }
     delay(1);
   }
 }
@@ -1084,7 +1151,8 @@ void TaskSave(void *pvParameters) {
       createFile();
     }
     else {
-      f = SD.open(fileName, FILE_APPEND);
+      // [B11] FILE_APPEND も openSDFileSafe で開いて SD 障害時のハング回避
+      f = openSDFileSafe(fileName, FILE_APPEND);
     }
   }
 }
