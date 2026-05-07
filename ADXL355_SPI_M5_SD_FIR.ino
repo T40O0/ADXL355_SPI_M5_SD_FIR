@@ -64,13 +64,14 @@ double AccFirY = 0.;
 double AccFirZ = 0.;
 
 // FIR taps and coefficients depend on SAMPLE_HZ.
+// Files live in the sketch's FIR/ subfolder.
 #if SAMPLE_HZ == 100
   #define FIR_TAPS 201
   static const double FIR_COEF[FIR_TAPS] = {
-    #include "FIR500_cut50.csv"
+    #include "FIR/FIR500_cut50.csv"
   };
 #elif SAMPLE_HZ == 500
-  #include "min500.cf"   // declares: double min500[80] = {...};
+  #include "FIR/min500.cf"   // declares: double min500[80] = {...};
   #define FIR_TAPS 80
   #define FIR_COEF min500
 #else

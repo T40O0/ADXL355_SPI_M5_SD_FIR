@@ -25,7 +25,7 @@ Mounting the ADXL355 into a [3D-printed frame](3D_model/frame.stl).
 
 3. Write  
 The code can be uploaded to your board using the Arduino IDE.  
-Before uploading, copy the [FIR filter file](into_library/) into your library folder.
+FIR coefficient files are bundled in the [`FIR/`](FIR/) subfolder of this sketch and included automatically.
 
 ## How to start
 There are three options before the measurement starts.
