@@ -2,10 +2,11 @@
 #include <M5Unified.h>
 #include <M5_ADXL355.h>
 
-// [U3] FTP server for "Data Dump" mode (peterus/ESP-FTP-Server-Lib)
-//      FS インスタンスをランタイムで渡す設計のため、マクロ override 問題なし
-#include <ESP-FTP-Server-Lib.h>
-#include <FTPFilesystem.h>
+// [U3] HTTP file server for "Data Dump" mode
+//      ESP32 標準の WebServer.h のみ使用 (外部ライブラリ不要、自動更新の懸念なし)
+//      個別 DL + 一括 ZIP DL に対応 (ZIP は無圧縮 store 形式でストリーミング生成)
+#include <WebServer.h>
+#include <vector>
 
 //==============================================================================
 // for RTC
@@ -96,8 +97,26 @@ void TaskSave( void *pvParameters );
 // queue
 xQueueHandle xQueue;
 
-// [U3] FTP サーバインスタンス (Data Dump モードで使用)
-FTPServer ftpSrv;
+// [U3] HTTP サーバインスタンス (Data Dump モードで使用、ポート 80)
+WebServer httpSrv(80);
+
+// [U3] CRC32 テーブル (ZIP 用、起動時に計算)
+static uint32_t crc32Table[256];
+static bool crc32TableReady = false;
+static void crc32Init() {
+  if (crc32TableReady) return;
+  for (int i = 0; i < 256; i++) {
+    uint32_t c = i;
+    for (int j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+    crc32Table[i] = c;
+  }
+  crc32TableReady = true;
+}
+static uint32_t crc32Update(uint32_t crc, const uint8_t *data, size_t len) {
+  crc = ~crc;
+  while (len--) crc = crc32Table[(crc ^ *data++) & 0xFF] ^ (crc >> 8);
+  return ~crc;
+}
 
 //==============================================================================
 
@@ -388,14 +407,232 @@ void Manual_Set() {
 
 //==============================================================================
 
-// [U3] Data Dump モード: SoftAP を立て、FTP サーバ経由で SD 内容を PC に提供
-//      Explorer のアドレスバーに ftp://m5:m5@192.168.4.1 で接続可能
-void Data_Dump_FTP() {
+// [U3] HTTP 経由でファイル一覧を返すユーティリティ
+//      指定ディレクトリ内の名前を String 配列に集める (ファイルとディレクトリ別)
+static void listDir(const String &path, std::vector<String> &outFiles, std::vector<String> &outDirs) {
+  File dir = SD.open(path);
+  if (!dir || !dir.isDirectory()) return;
+  while (true) {
+    File entry = dir.openNextFile();
+    if (!entry) break;
+    String name = entry.name();
+    // [U3] SD ライブラリは name に絶対パスを返す場合があるので basename だけ抽出
+    int slash = name.lastIndexOf('/');
+    if (slash >= 0) name = name.substring(slash + 1);
+    if (entry.isDirectory()) outDirs.push_back(name);
+    else                     outFiles.push_back(name);
+    entry.close();
+  }
+  dir.close();
+}
+
+// [U3] HTTP ルート: トップレベルのフォルダ/ファイル一覧
+static void handleRoot() {
+  std::vector<String> files, dirs;
+  listDir("/", files, dirs);
+
+  String html;
+  html.reserve(8192);
+  html  = F("<!doctype html><html><head><meta charset=\"utf-8\"><title>M5-SEISMO Data</title>");
+  html += F("<style>body{font-family:sans-serif;margin:20px}a{text-decoration:none}li{margin:4px 0}</style></head><body>");
+  html += F("<h1>M5-SEISMO Data Server</h1>");
+  html += F("<p><a href=\"/zipall\">[Download ALL as ZIP]</a></p>");
+  html += F("<h2>Folders</h2><ul>");
+  for (auto &d : dirs) {
+    html += "<li><a href=\"/folder?p=/" + d + "\">" + d + "/</a> ";
+    html += "[<a href=\"/zip?p=/" + d + "\">ZIP</a>]</li>";
+  }
+  html += F("</ul><h2>Files (root)</h2><ul>");
+  for (auto &f : files) {
+    html += "<li><a href=\"/dl?p=/" + f + "\">" + f + "</a></li>";
+  }
+  html += F("</ul></body></html>");
+  httpSrv.send(200, "text/html; charset=utf-8", html);
+}
+
+// [U3] HTTP /folder: 指定フォルダ内のファイル一覧
+static void handleFolder() {
+  String p = httpSrv.arg("p");
+  if (p.length() == 0 || p[0] != '/') { httpSrv.send(400, "text/plain", "bad path"); return; }
+  std::vector<String> files, dirs;
+  listDir(p, files, dirs);
+
+  String html;
+  html.reserve(16384);
+  html  = F("<!doctype html><html><head><meta charset=\"utf-8\"><title>");
+  html += p;
+  html += F("</title></head><body>");
+  html += "<h1>" + p + "</h1>";
+  html += "<p><a href=\"/\">&larr; Back</a> &nbsp; <a href=\"/zip?p=" + p + "\">[Download this folder as ZIP]</a></p>";
+  html += F("<ul>");
+  for (auto &f : files) {
+    html += "<li><a href=\"/dl?p=" + p + "/" + f + "\">" + f + "</a></li>";
+  }
+  html += F("</ul></body></html>");
+  httpSrv.send(200, "text/html; charset=utf-8", html);
+}
+
+// [U3] HTTP /dl: 個別ファイル DL
+static void handleDownload() {
+  String p = httpSrv.arg("p");
+  if (p.length() == 0 || p[0] != '/') { httpSrv.send(400, "text/plain", "bad path"); return; }
+  File f = SD.open(p);
+  if (!f || f.isDirectory()) { httpSrv.send(404, "text/plain", "not found"); if (f) f.close(); return; }
+  // basename を取り出して Content-Disposition に
+  int slash = p.lastIndexOf('/');
+  String fname = (slash >= 0) ? p.substring(slash + 1) : p;
+  httpSrv.sendHeader("Content-Disposition", "attachment; filename=\"" + fname + "\"");
+  httpSrv.streamFile(f, "text/csv");
+  f.close();
+}
+
+// [U3] ZIP ストリーミング本体: ファイルパスのリストを ZIP として client に書き出す
+//      無圧縮 (store) 形式。ZIP-32 (4GB 以下) 対応
+static void streamZip(WiFiClient &client, const std::vector<String> &fullPaths, const std::vector<String> &archiveNames) {
+  crc32Init();
+  String centralDir;          // 全エントリの central directory (バッファ)
+  centralDir.reserve(fullPaths.size() * 80);
+  uint32_t totalOffset = 0;
+
+  uint8_t hdr[46];
+  uint8_t buf[1024];
+
+  for (size_t idx = 0; idx < fullPaths.size(); idx++) {
+    File f = SD.open(fullPaths[idx]);
+    if (!f || f.isDirectory()) { if (f) f.close(); continue; }
+    uint32_t size = f.size();
+
+    // CRC32 を計算 (ファイルを 1 周読む)
+    uint32_t crc = 0;
+    while (f.available()) {
+      int n = f.read(buf, sizeof(buf));
+      if (n <= 0) break;
+      crc = crc32Update(crc, buf, n);
+    }
+    f.seek(0);
+
+    const String &name = archiveNames[idx];
+    uint16_t nameLen = name.length();
+
+    // Local file header (30 byte + filename)
+    memset(hdr, 0, 30);
+    hdr[0]=0x50; hdr[1]=0x4b; hdr[2]=0x03; hdr[3]=0x04;   // signature
+    hdr[4]=20;                                              // version
+    // flags=0, method=0 (store), time=0, date=0x21 (1980-01-01)
+    hdr[12]=0x21;
+    hdr[14]= crc        & 0xFF; hdr[15]=(crc>>8)&0xFF; hdr[16]=(crc>>16)&0xFF; hdr[17]=(crc>>24)&0xFF;
+    hdr[18]= size       & 0xFF; hdr[19]=(size>>8)&0xFF; hdr[20]=(size>>16)&0xFF; hdr[21]=(size>>24)&0xFF;
+    hdr[22]= size       & 0xFF; hdr[23]=(size>>8)&0xFF; hdr[24]=(size>>16)&0xFF; hdr[25]=(size>>24)&0xFF;
+    hdr[26]= nameLen    & 0xFF; hdr[27]=(nameLen>>8)&0xFF;
+    client.write(hdr, 30);
+    client.write((const uint8_t*)name.c_str(), nameLen);
+
+    // ファイル本体ストリーミング
+    while (f.available()) {
+      int n = f.read(buf, sizeof(buf));
+      if (n <= 0) break;
+      client.write(buf, n);
+    }
+    f.close();
+
+    // Central directory entry (46 byte + filename) をバッファ追記
+    uint8_t cd[46];
+    memset(cd, 0, 46);
+    cd[0]=0x50; cd[1]=0x4b; cd[2]=0x01; cd[3]=0x02;        // CD signature
+    cd[4]=20; cd[6]=20;                                     // version made by / needed
+    cd[12]=0x21;                                            // date
+    cd[16]= crc        & 0xFF; cd[17]=(crc>>8)&0xFF; cd[18]=(crc>>16)&0xFF; cd[19]=(crc>>24)&0xFF;
+    cd[20]= size       & 0xFF; cd[21]=(size>>8)&0xFF; cd[22]=(size>>16)&0xFF; cd[23]=(size>>24)&0xFF;
+    cd[24]= size       & 0xFF; cd[25]=(size>>8)&0xFF; cd[26]=(size>>16)&0xFF; cd[27]=(size>>24)&0xFF;
+    cd[28]= nameLen    & 0xFF; cd[29]=(nameLen>>8)&0xFF;
+    cd[42]= totalOffset & 0xFF; cd[43]=(totalOffset>>8)&0xFF; cd[44]=(totalOffset>>16)&0xFF; cd[45]=(totalOffset>>24)&0xFF;
+    centralDir.concat((const char*)cd, 46);
+    centralDir.concat(name);
+
+    totalOffset += 30 + nameLen + size;
+  }
+
+  // Central directory 全体を送信
+  uint32_t cdSize = centralDir.length();
+  uint32_t cdOffset = totalOffset;
+  client.write((const uint8_t*)centralDir.c_str(), cdSize);
+
+  // End of Central Directory record (22 byte)
+  uint8_t eocd[22];
+  memset(eocd, 0, 22);
+  eocd[0]=0x50; eocd[1]=0x4b; eocd[2]=0x05; eocd[3]=0x06;
+  uint16_t entries = (uint16_t)fullPaths.size();
+  eocd[8]=  entries  & 0xFF; eocd[9]=(entries>>8)&0xFF;
+  eocd[10]= entries  & 0xFF; eocd[11]=(entries>>8)&0xFF;
+  eocd[12]= cdSize   & 0xFF; eocd[13]=(cdSize>>8)&0xFF; eocd[14]=(cdSize>>16)&0xFF; eocd[15]=(cdSize>>24)&0xFF;
+  eocd[16]= cdOffset & 0xFF; eocd[17]=(cdOffset>>8)&0xFF; eocd[18]=(cdOffset>>16)&0xFF; eocd[19]=(cdOffset>>24)&0xFF;
+  client.write(eocd, 22);
+  client.flush();
+}
+
+// [U3] /zip?p=<folder>: 指定フォルダ内の全ファイルを ZIP で DL
+static void handleZipFolder() {
+  String p = httpSrv.arg("p");
+  if (p.length() == 0 || p[0] != '/') { httpSrv.send(400, "text/plain", "bad path"); return; }
+
+  std::vector<String> files, dirs;
+  listDir(p, files, dirs);
+  // フォルダ名を ZIP ファイル名に
+  String zipName = p.substring(1) + ".zip";
+
+  std::vector<String> fullPaths, archiveNames;
+  for (auto &f : files) {
+    fullPaths.push_back(p + "/" + f);
+    archiveNames.push_back(f);   // フォルダ名は付けず flat に格納
+  }
+
+  httpSrv.sendHeader("Content-Type", "application/zip");
+  httpSrv.sendHeader("Content-Disposition", "attachment; filename=\"" + zipName + "\"");
+  httpSrv.sendHeader("Connection", "close");
+  httpSrv.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  httpSrv.send(200, "application/zip", "");
+  WiFiClient client = httpSrv.client();
+  streamZip(client, fullPaths, archiveNames);
+  client.stop();
+}
+
+// [U3] /zipall: SD ルート以下の全ファイルを再帰的に ZIP
+static void handleZipAll() {
+  std::vector<String> fullPaths, archiveNames;
+  // ルートをスキャン
+  std::vector<String> rootFiles, rootDirs;
+  listDir("/", rootFiles, rootDirs);
+  for (auto &f : rootFiles) {
+    fullPaths.push_back("/" + f);
+    archiveNames.push_back(f);
+  }
+  for (auto &d : rootDirs) {
+    std::vector<String> sub, subD;
+    listDir("/" + d, sub, subD);
+    for (auto &f : sub) {
+      fullPaths.push_back("/" + d + "/" + f);
+      archiveNames.push_back(d + "/" + f);   // フォルダ名込みで格納
+    }
+  }
+
+  httpSrv.sendHeader("Content-Type", "application/zip");
+  httpSrv.sendHeader("Content-Disposition", "attachment; filename=\"all.zip\"");
+  httpSrv.sendHeader("Connection", "close");
+  httpSrv.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  httpSrv.send(200, "application/zip", "");
+  WiFiClient client = httpSrv.client();
+  streamZip(client, fullPaths, archiveNames);
+  client.stop();
+}
+
+// [U3] Data Dump モード: SoftAP + HTTP サーバ
+//      ブラウザで http://192.168.4.1 にアクセスしてファイル一覧 / 個別 DL / 一括 ZIP DL
+void Data_Dump_HTTP() {
   M5.Lcd.fillScreen(BLACK);
   M5.Lcd.setTextColor(WHITE, BLACK);
   M5.Lcd.setCursor(0, 0);
   M5.Lcd.setTextFont(2);
-  M5.Lcd.println("Data Dump (AP+FTP)");
+  M5.Lcd.println("Data Dump (AP+HTTP)");
   M5.Lcd.println();
 
   // SoftAP 起動
@@ -404,28 +641,27 @@ void Data_Dump_FTP() {
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
   WiFi.softAP("M5-SEISMO", "m5seismo");
 
-  // [U3] FTP サーバ起動 (ESP-FTP-Server-Lib API)
-  //      addUser/addFilesystem で動的に SD を登録、マクロ依存なし
-  ftpSrv.addUser("m5", "m5");
-  ftpSrv.addFilesystem("SD", &SD);
-  ftpSrv.begin();
+  // [U3] WebServer ルーティング
+  httpSrv.on("/",       HTTP_GET, handleRoot);
+  httpSrv.on("/folder", HTTP_GET, handleFolder);
+  httpSrv.on("/dl",     HTTP_GET, handleDownload);
+  httpSrv.on("/zip",    HTTP_GET, handleZipFolder);
+  httpSrv.on("/zipall", HTTP_GET, handleZipAll);
+  httpSrv.begin();
 
-  // 案内表示
   M5.Lcd.printf("SSID: M5-SEISMO\n");
   M5.Lcd.printf("PASS: m5seismo\n");
   M5.Lcd.println();
-  M5.Lcd.printf("URL : ftp://192.168.4.1\n");
-  M5.Lcd.printf("User: m5\n");
-  M5.Lcd.printf("Pass: m5\n");
+  M5.Lcd.printf("Open in browser:\n");
+  M5.Lcd.println("http://192.168.4.1");
   M5.Lcd.println();
-  M5.Lcd.println("Open in Explorer:");
-  M5.Lcd.println("ftp://m5:m5@192.168.4.1");
+  M5.Lcd.println("Click [Download ALL as ZIP]");
+  M5.Lcd.println("for full backup.");
   M5.Lcd.println();
   M5.Lcd.println("Reset M5 to exit.");
 
-  // FTP イベントループ(リセットまで戻らない)
   while (true) {
-    ftpSrv.handle();   // [U3] ESP-FTP-Server-Lib の API は handle() (旧 handleFTP() ではない)
+    httpSrv.handleClient();
     delay(1);
   }
 }
@@ -495,7 +731,7 @@ void setup() {
             case 0: Set_WiFi();      break;
             case 1: Set_RTC();       break;
             case 2: Manual_Set();    break;
-            case 3: Data_Dump_FTP(); break;  // 戻ってこない
+            case 3: Data_Dump_HTTP(); break;  // 戻ってこない
           }
           dispatched = true;
           break;
