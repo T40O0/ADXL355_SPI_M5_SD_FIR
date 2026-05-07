@@ -555,9 +555,10 @@ static void streamZip(const String &zipName,
   totalSize += cdSize + 22;
   Serial.printf("ZIP: %u entries, total %u bytes\n", entries, totalSize);
 
-  // Use exact Content-Length and raw client.write() (same scheme as
-  // streamFile()), which Vivaldi handles cleanly. Avoids chunked-transfer
-  // edge cases where some browsers wait for connection close.
+  // Build each file's full ZIP entry (local header + name + data + data
+  // descriptor) in a single PSRAM buffer and emit it with one
+  // client.write(). This minimises per-call TCP overhead, which was the
+  // main reason raw chunked / sendContent paths felt slow.
   httpSrv.sendHeader("Content-Type", "application/zip");
   httpSrv.sendHeader("Content-Disposition", "attachment; filename=\"" + zipName + "\"");
   httpSrv.sendHeader("Connection", "close");
@@ -569,49 +570,75 @@ static void streamZip(const String &zipName,
   centralDir.reserve(cdSize);
   uint32_t totalOffset = 0;
 
-  uint8_t hdr[30];
-  uint8_t dd[16];
-  uint8_t buf[4096];
-
   for (size_t i = 0; i < fullPaths.size(); i++) {
     const String &name = archiveNames[i];
     uint16_t namelen = name.length();
     uint32_t size = sizes[i];
 
-    // Local file header (CRC=0, sizes=0, flag bit 3 = data descriptor follows)
-    memset(hdr, 0, 30);
-    hdr[0]=0x50; hdr[1]=0x4b; hdr[2]=0x03; hdr[3]=0x04;
-    hdr[4]=20;
-    hdr[6]=0x08;
-    hdr[12]=0x21;
-    hdr[26]= namelen & 0xFF; hdr[27]=(namelen>>8)&0xFF;
-    client.write(hdr, 30);
-    client.write((const uint8_t*)name.c_str(), namelen);
+    // Per-file buffer: hdr (30) + name + data + dd (16)
+    size_t bufSize = 30 + namelen + size + 16;
+    uint8_t *fb = (uint8_t*)ps_malloc(bufSize);
+    if (!fb) {
+      Serial.printf("ZIP: ps_malloc(%u) failed for entry %u\n", (unsigned)bufSize, (unsigned)i);
+      // Last-resort fallback: emit zeros so Content-Length stays consistent
+      uint8_t zero[256] = {0};
+      size_t left = bufSize;
+      while (left > 0) {
+        size_t w = left > sizeof(zero) ? sizeof(zero) : left;
+        client.write(zero, w);
+        left -= w;
+      }
+      totalOffset += bufSize;
+      continue;
+    }
 
+    // Local file header (CRC=0, sizes=0, flag bit 3 = data descriptor follows)
+    memset(fb, 0, 30);
+    fb[0]=0x50; fb[1]=0x4b; fb[2]=0x03; fb[3]=0x04;
+    fb[4]=20;
+    fb[6]=0x08;
+    fb[12]=0x21;
+    fb[26]= namelen & 0xFF; fb[27]=(namelen>>8)&0xFF;
+    memcpy(fb + 30, name.c_str(), namelen);
+
+    // File data: read into the buffer at offset (30 + namelen) and CRC32
     File f = SD.open(fullPaths[i]);
     uint32_t crc = 0;
+    uint32_t pos = 30 + namelen;
     uint32_t remaining = size;
     while (remaining > 0) {
-      uint32_t want = remaining > sizeof(buf) ? sizeof(buf) : remaining;
-      int n = f.read(buf, want);
+      uint32_t want = remaining > 4096 ? 4096 : remaining;
+      int n = f ? f.read(fb + pos, want) : 0;
       if (n <= 0) {
-        memset(buf, 0, want);
+        memset(fb + pos, 0, want);
         n = want;
       }
-      crc = crc32Update(crc, buf, n);
-      client.write(buf, n);
+      crc = crc32Update(crc, fb + pos, n);
+      pos += n;
       remaining -= n;
-      yield();
     }
-    f.close();
+    if (f) f.close();
 
-    // Data descriptor (signature + CRC + compressed size + uncompressed size = 16 byte)
-    dd[0]=0x50; dd[1]=0x4b; dd[2]=0x07; dd[3]=0x08;
-    dd[4]= crc       & 0xFF; dd[5]=(crc>>8)&0xFF; dd[6]=(crc>>16)&0xFF; dd[7]=(crc>>24)&0xFF;
-    dd[8]= size      & 0xFF; dd[9]=(size>>8)&0xFF; dd[10]=(size>>16)&0xFF; dd[11]=(size>>24)&0xFF;
-    dd[12]=size      & 0xFF; dd[13]=(size>>8)&0xFF; dd[14]=(size>>16)&0xFF; dd[15]=(size>>24)&0xFF;
-    client.write(dd, 16);
+    // Data descriptor at end of buffer (signature + CRC + 2x size = 16 byte)
+    pos = 30 + namelen + size;
+    fb[pos+0]=0x50; fb[pos+1]=0x4b; fb[pos+2]=0x07; fb[pos+3]=0x08;
+    fb[pos+4]= crc       & 0xFF; fb[pos+5]=(crc>>8)&0xFF; fb[pos+6]=(crc>>16)&0xFF; fb[pos+7]=(crc>>24)&0xFF;
+    fb[pos+8]= size      & 0xFF; fb[pos+9]=(size>>8)&0xFF; fb[pos+10]=(size>>16)&0xFF; fb[pos+11]=(size>>24)&0xFF;
+    fb[pos+12]=size      & 0xFF; fb[pos+13]=(size>>8)&0xFF; fb[pos+14]=(size>>16)&0xFF; fb[pos+15]=(size>>24)&0xFF;
 
+    // One single write for the entire file entry
+    size_t written = 0;
+    while (written < bufSize) {
+      size_t w = client.write(fb + written, bufSize - written);
+      if (w == 0) {
+        delay(1);
+        continue;
+      }
+      written += w;
+    }
+    free(fb);
+
+    // Central directory entry
     uint8_t cd[46];
     memset(cd, 0, 46);
     cd[0]=0x50; cd[1]=0x4b; cd[2]=0x01; cd[3]=0x02;
@@ -626,12 +653,19 @@ static void streamZip(const String &zipName,
     centralDir.concat((const char*)cd, 46);
     centralDir.concat(name);
 
-    totalOffset += 30 + namelen + size + 16;
+    totalOffset += bufSize;
   }
 
   uint32_t cdOffset = totalOffset;
   if (centralDir.length() > 0) {
-    client.write((const uint8_t*)centralDir.c_str(), centralDir.length());
+    size_t written = 0;
+    size_t total = centralDir.length();
+    const uint8_t *p = (const uint8_t*)centralDir.c_str();
+    while (written < total) {
+      size_t w = client.write(p + written, total - written);
+      if (w == 0) { delay(1); continue; }
+      written += w;
+    }
   }
 
   // End of Central Directory record (22 byte)
