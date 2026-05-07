@@ -562,17 +562,17 @@ static void streamZip(const String &zipName,
   Serial.printf("ZIP: %u entries, total %u bytes\n", entries, totalSize);
 
   // Traditional ZIP format: CRC and sizes are written inline in the local
-  // file header (no data descriptor / no flag bit 3). Each entry is fully
-  // self-contained, which lets streaming download managers (Vivaldi etc.)
-  // mark the download complete as soon as Content-Length bytes arrive.
-  // Each file's complete entry (hdr + name + data) is built in one
-  // PSRAM buffer and emitted via a single client.write().
-  httpSrv.sendHeader("Content-Type", "application/zip");
+  // file header (no data descriptor / no flag bit 3). Each entry is
+  // self-contained, which lets streaming download managers mark the
+  // download complete as soon as Content-Length bytes arrive.
+  //
+  // Mirror the streamFile() flow: only set Content-Disposition and
+  // Content-Length, then let httpSrv.sendContent() do the writes.
+  // No explicit Connection: close, no client.stop()/flush(); the
+  // WebServer manages the connection lifecycle.
   httpSrv.sendHeader("Content-Disposition", "attachment; filename=\"" + zipName + "\"");
-  httpSrv.sendHeader("Connection", "close");
   httpSrv.setContentLength(totalSize);
   httpSrv.send(200, "application/zip", "");
-  WiFiClient client = httpSrv.client();
 
   String centralDir;
   centralDir.reserve(cdSize);
@@ -631,16 +631,8 @@ static void streamZip(const String &zipName,
     fb[26]= namelen   & 0xFF; fb[27]=(namelen>>8)&0xFF;
     memcpy(fb + 30, name.c_str(), namelen);
 
-    // One single write for the entire file entry.
-    size_t written = 0;
-    while (written < bufSize) {
-      size_t w = client.write(fb + written, bufSize - written);
-      if (w == 0) {
-        delay(1);
-        continue;
-      }
-      written += w;
-    }
+    // One single send for the entire file entry.
+    httpSrv.sendContent((const char*)fb, bufSize);
     free(fb);
 
     // Central directory entry (mirrors the local header, flag = 0).
@@ -663,14 +655,7 @@ static void streamZip(const String &zipName,
 
   uint32_t cdOffset = totalOffset;
   if (centralDir.length() > 0) {
-    size_t written = 0;
-    size_t total = centralDir.length();
-    const uint8_t *p = (const uint8_t*)centralDir.c_str();
-    while (written < total) {
-      size_t w = client.write(p + written, total - written);
-      if (w == 0) { delay(1); continue; }
-      written += w;
-    }
+    httpSrv.sendContent(centralDir.c_str(), centralDir.length());
   }
 
   // End of Central Directory record (22 byte)
@@ -681,10 +666,7 @@ static void streamZip(const String &zipName,
   eocd[10]= entries & 0xFF; eocd[11]=(entries>>8)&0xFF;
   eocd[12]= cdSize  & 0xFF; eocd[13]=(cdSize>>8)&0xFF; eocd[14]=(cdSize>>16)&0xFF; eocd[15]=(cdSize>>24)&0xFF;
   eocd[16]= cdOffset& 0xFF; eocd[17]=(cdOffset>>8)&0xFF; eocd[18]=(cdOffset>>16)&0xFF; eocd[19]=(cdOffset>>24)&0xFF;
-  client.write(eocd, 22);
-
-  client.flush();
-  client.stop();
+  httpSrv.sendContent((const char*)eocd, 22);
 }
 //==============================================================================
 
