@@ -555,14 +555,15 @@ static void streamZip(const String &zipName,
   totalSize += cdSize + 22;
   Serial.printf("ZIP: %u entries, total %u bytes\n", entries, totalSize);
 
+  // Use exact Content-Length and raw client.write() (same scheme as
+  // streamFile()), which Vivaldi handles cleanly. Avoids chunked-transfer
+  // edge cases where some browsers wait for connection close.
   httpSrv.sendHeader("Content-Type", "application/zip");
   httpSrv.sendHeader("Content-Disposition", "attachment; filename=\"" + zipName + "\"");
   httpSrv.sendHeader("Connection", "close");
-  // Chunked transfer (CONTENT_LENGTH_UNKNOWN). httpSrv.sendContent() then
-  // frames each chunk properly, which is what browsers expect when the
-  // body length is not known in advance.
-  httpSrv.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  httpSrv.setContentLength(totalSize);
   httpSrv.send(200, "application/zip", "");
+  WiFiClient client = httpSrv.client();
 
   String centralDir;
   centralDir.reserve(cdSize);
@@ -584,8 +585,8 @@ static void streamZip(const String &zipName,
     hdr[6]=0x08;
     hdr[12]=0x21;
     hdr[26]= namelen & 0xFF; hdr[27]=(namelen>>8)&0xFF;
-    httpSrv.sendContent((const char*)hdr, 30);
-    httpSrv.sendContent(name);
+    client.write(hdr, 30);
+    client.write((const uint8_t*)name.c_str(), namelen);
 
     File f = SD.open(fullPaths[i]);
     uint32_t crc = 0;
@@ -598,7 +599,7 @@ static void streamZip(const String &zipName,
         n = want;
       }
       crc = crc32Update(crc, buf, n);
-      httpSrv.sendContent((const char*)buf, n);
+      client.write(buf, n);
       remaining -= n;
       yield();
     }
@@ -609,7 +610,7 @@ static void streamZip(const String &zipName,
     dd[4]= crc       & 0xFF; dd[5]=(crc>>8)&0xFF; dd[6]=(crc>>16)&0xFF; dd[7]=(crc>>24)&0xFF;
     dd[8]= size      & 0xFF; dd[9]=(size>>8)&0xFF; dd[10]=(size>>16)&0xFF; dd[11]=(size>>24)&0xFF;
     dd[12]=size      & 0xFF; dd[13]=(size>>8)&0xFF; dd[14]=(size>>16)&0xFF; dd[15]=(size>>24)&0xFF;
-    httpSrv.sendContent((const char*)dd, 16);
+    client.write(dd, 16);
 
     uint8_t cd[46];
     memset(cd, 0, 46);
@@ -630,7 +631,7 @@ static void streamZip(const String &zipName,
 
   uint32_t cdOffset = totalOffset;
   if (centralDir.length() > 0) {
-    httpSrv.sendContent(centralDir.c_str(), centralDir.length());
+    client.write((const uint8_t*)centralDir.c_str(), centralDir.length());
   }
 
   // End of Central Directory record (22 byte)
@@ -641,16 +642,10 @@ static void streamZip(const String &zipName,
   eocd[10]= entries & 0xFF; eocd[11]=(entries>>8)&0xFF;
   eocd[12]= cdSize  & 0xFF; eocd[13]=(cdSize>>8)&0xFF; eocd[14]=(cdSize>>16)&0xFF; eocd[15]=(cdSize>>24)&0xFF;
   eocd[16]= cdOffset& 0xFF; eocd[17]=(cdOffset>>8)&0xFF; eocd[18]=(cdOffset>>16)&0xFF; eocd[19]=(cdOffset>>24)&0xFF;
-  httpSrv.sendContent((const char*)eocd, 22);
+  client.write(eocd, 22);
 
-  // End the chunked stream (empty chunk) and close the connection so the
-  // browser detects EOF immediately. Without the explicit stop() some
-  // browsers (Vivaldi) keep the download in a waiting state even after
-  // the final chunk arrived.
-  httpSrv.sendContent("");
-  httpSrv.client().flush();
-  delay(50);
-  httpSrv.client().stop();
+  client.flush();
+  client.stop();
 }
 
 static void handleZipFolder() {
