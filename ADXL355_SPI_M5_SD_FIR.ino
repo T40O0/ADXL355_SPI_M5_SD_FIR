@@ -38,7 +38,7 @@
 //   100 Hz : ADXL355 ODR=500 Hz, 201-tap FIR, 50 Hz cutoff (FIR500_cut50.csv).
 //   500 Hz : ADXL355 ODR=1000 Hz, 80-tap minimum-phase FIR (Telemetra min500.cf,
 //            passband 200 Hz, stopband 250 Hz @ -120 dB).
-#define SAMPLE_HZ 500
+#define SAMPLE_HZ 100
 
 unsigned int hz = SAMPLE_HZ;
 unsigned int dtWrite = 1000 / hz;
@@ -815,11 +815,6 @@ void setup() {
     dt = M5.Rtc.getDateTime();
   }
 
-  // Open the first file before tasks start so the first batch is not lost.
-  dt = M5.Rtc.getDateTime();
-  createPath();
-  createFile();
-
   // Queue holds up to 3 String pointers to absorb transient SD delays.
   xQueue = xQueueCreate(3, sizeof(String*));
   if (xQueue != NULL){
@@ -944,6 +939,7 @@ void TaskRead(void *pvParameters) {
 
 void TaskSave(void *pvParameters) {
   String *recData = nullptr;
+  bool firstBatch = true;
 
   delay(5);
 
@@ -954,6 +950,18 @@ void TaskSave(void *pvParameters) {
       portENTER_CRITICAL(&dtMux);
       dt = localDt;      portEXIT_CRITICAL(&dtMux);
       continue;
+    }
+
+    // First batch: create the initial file using the post sec=0 RTC,
+    // so the file name reflects the actual data start minute.
+    if (firstBatch) {
+      auto firstDt = M5.Rtc.getDateTime();
+      portENTER_CRITICAL(&dtMux);
+      dt = firstDt;
+      portEXIT_CRITICAL(&dtMux);
+      createPath();
+      createFile();
+      firstBatch = false;
     }
 
     *recData += '\n';

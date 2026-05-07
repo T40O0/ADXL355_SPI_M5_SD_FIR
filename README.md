@@ -3,15 +3,17 @@
 
 ## Prerequisite
  - ADXL355 ([EVAL-ADXL355-PMDZ](https://www.analog.com/en/products/adxl355.html#product-overview))
- - [M5Stack Tough](https://docs.m5stack.com/en/core/tough) 
+ - [M5Stack Tough](https://docs.m5stack.com/en/core/tough)
  - [modified version](https://github.com/T40O0/M5_ADXL355/tree/M5) of [plasmapper/adxl355-arduino](https://github.com/plasmapper/adxl355-arduino)  
 Hats off to PL.
 
 ## Features
  - Cost-effective: It can be made for about €100.
  - Records three acceleration components (cm/sec/sec).
- - 100 Hz sampling with 50 Hz high-cut FIR filter.
- - Stores files on a TF card.
+ - Selectable output rate at compile time: **100 Hz** or  **500 Hz** .
+ - Dual-core FreeRTOS pipeline (TaskRead on PRO_CPU, TaskSave on APP_CPU) decouples sampling from SD I/O.
+ - One CSV file per minute on a TF card; daily folder layout (`/YYYYMMDD/HHMM.csv`).
+ - Built-in Wi-Fi AP + FTP server for data retrieval (no SD card removal required).
  - Dust- and water-resistant (do not submerge the case in water or other liquids).
  - Made of UV-resistant plastic, so it can be used outdoors and in areas where acid gases are generated, such as volcanic regions.
 
@@ -27,29 +29,49 @@ Mounting the ADXL355 into a [3D-printed frame](3D_model/frame.stl).
 The code can be uploaded to your board using the Arduino IDE.  
 FIR coefficient files are bundled in the [`FIR/`](FIR/) subfolder of this sketch and included automatically.
 
+## Sampling rate selection
+At the top of the sketch, set the desired output rate:
+```cpp
+#define SAMPLE_HZ 100  // 100 or 500
+```
+- `100`: ADXL355 ODR=500 Hz, 201-tap FIR (`FIR/FIR500_cut50.csv`).
+- `500`: ADXL355 ODR=1000 Hz, 80-tap minimum-phase FIR (`FIR/min500.cf`).
+
 ## How to start
-There are three options before the measurement starts.
-1. Power On >> Wait 30 seconds >> Start
-2. Power On >> RTC Reset >> Start
-3. Power On >> Set Wi-Fi Access Point >> RTC Reset >> Start
+On power-on, a startup screen with four options is shown for 30 seconds. Tap a button, or wait for the timer to elapse.
+
+1. **Wi-Fi Setting** - SmartConfig (set or change the Wi-Fi access point), then NTP sync of the RTC.
+2. **Reset RTC** - Connect to a saved Wi-Fi access point and resync the RTC via NTP.
+3. **Manual Set** - Set RTC year/month/day/hour/minute/second on the touch screen (no Wi-Fi needed).
+4. **Data Dump** - Start a SoftAP + FTP server. Connect a PC to the AP and pull files via Explorer.
+
+After any of the above (or after the 30 second timeout), measurement begins at the next RTC second `00`.
+
 <img src="images/start.JPG"  width="400">
 
 ## Note
- - RTC setting required: measurements will only start if the RTC year is set between 2026 and 2031. Modify line 298 if necessary.  
-   `while((dt.date.year < 2026) || (dt.date.year > 2031)) {`
- - If you can connect to Wi-Fi, touch the "Reset RTC!" button that appears on the startup screen. The M5Tough will access any NTP server and start resetting the RTC. Just edit lines 11-14 to suit your environment. Once completed, the measurement will start automatically.  
+ - **RTC year range**: measurements only start when the RTC year is in 2026..2099. Edit `setup()` if needed.  
+   `while ((dt.date.year < 2026) || (dt.date.year > 2099)) {`
+ - **NTP setup**: edit the defines near the top of the sketch to fit your environment.  
    `#define NTP_TIMEZONE  "your zone"`  
    `#define NTP_SERVER1   "your server1"`  
-   `#define NTP_SERVER1   "your server2"`  
-   `#define NTP_SERVER1   "your server3"`
- - If you want to connect the M5Tough to Wi-Fi for the first time or to a different access point, select "Wi-Fi Settings." Then, use the "SmartConfig ESP" or "ESP Touch" app on your phone to change the Wi-Fi settings. The app will display the access point to which your phone is currently connected. Enter the password, and it will appear on the M5Tough.
- - Data output from the ADXL355 at 500 Hz is decimated to 100 Hz. The supplied FIR filter is a high-cut filter with a cutoff frequency of 50 Hz for 500 Hz. To change the frequency, create a new FIR filter file.
- - A file is created every minute (RTC-based) and acceleration data is written to the file every 15 seconds (clock-based). Due to the different counting bases, it rarely happens that one file contains 45 secondof data and the next file contains 75 seconds of data.
+   `#define NTP_SERVER2   "your server2"`  
+   `#define NTP_SERVER3   "your server3"`
+ - **Wi-Fi setup (first time / new access point)**: choose **Wi-Fi Setting** on the startup screen, then use the *SmartConfig ESP* or *ESP Touch* app on your phone to push the SSID/password. The RTC reset proceeds automatically once the device is connected.
+ - **Manual RTC**: use **Manual Set** when no Wi-Fi is available (e.g., remote field deployment). A 10-second confirmation screen is shown before measurement begins.
+ - **Data Dump (FTP)**: choose **Data Dump** on the startup screen. The device acts as a SoftAP (`SSID: M5-SEISMO / PASS: m5seismo`). On a connected PC, open `ftp://m5:m5@192.168.4.1` in Windows Explorer (user `m5` / pass `m5`) and copy files. Tap the on-screen **Reset** button to return to the startup screen.
+ - **FIR cutoff (100 Hz mode)**: the supplied 201-tap FIR cuts at 50 Hz for a 500 Hz input. Replace `FIR/FIR500_cut50.csv` to change the cutoff.
+ - **FIR coefficients (500 Hz mode)**: this sketch ships with `FIR/min500.cf`, an 80-tap minimum-phase FIR (200 Hz passband / 250 Hz stopband at -120 dB) generated by [Telemetra-1](https://telemetra.jp/) and used here with permission. Replace `FIR/min500.cf` with your own minimum-phase 80-tap design (declared as `double min500[80] = {...};`) to change the response.
+ - **File layout**: daily folders `/YYYYMMDD/` contain per-minute files `HHMM.csv`. Each file holds 60 seconds of data, aligned to the RTC second `00`. Data captured between power-on and the first sec=0 boundary is intentionally discarded so file timing matches the file name.
  - A "[hat](3D_model/hat.stl)" is recommended for outdoor use.
    - [x] Blocks sunlight and protects the LCD.
    - [x] Falling volcanic ash is washed away by rain.
  - Do not submerge the case in water or other liquids.
 
 ## Licence
-This project is licensed under the MIT licence - see the [LICENSE file](LICENSE) for details.
+This project bundles components from multiple sources, each under its own licence:
+ - **ADXL355 driver code**: based on [plasmapper/adxl355-arduino](https://github.com/plasmapper/adxl355-arduino) (PL) - see the upstream repository for its licence terms.
+ - **`FIR/min500.cf` (500 Hz minimum-phase FIR)**: provided by [Telemetra-1](https://telemetra.jp/) - subject to Telemetra's own licence terms.
+ - **All other original work in this repository** (sketch code, FIR/FIR500_cut50.csv, 3D models, etc.): MIT licence - see the [LICENSE file](LICENSE) for details.
 
+When redistributing or modifying this project, please honour each component's respective licence.
