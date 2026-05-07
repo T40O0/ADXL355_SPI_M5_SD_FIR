@@ -1,7 +1,11 @@
 #include <SD.h>
 #include <M5Unified.h>
 #include <M5_ADXL355.h>
-#include <SimpleFTPServer.h>   // [U3] FTP server for "Data Dump" mode (xreef/SimpleFTPServer)
+
+// [U3] FTP server for "Data Dump" mode (peterus/ESP-FTP-Server-Lib)
+//      FS インスタンスをランタイムで渡す設計のため、マクロ override 問題なし
+#include <ESP-FTP-Server-Lib.h>
+#include <FTPFilesystem.h>
 
 //==============================================================================
 // for RTC
@@ -93,7 +97,7 @@ void TaskSave( void *pvParameters );
 xQueueHandle xQueue;
 
 // [U3] FTP サーバインスタンス (Data Dump モードで使用)
-FtpServer ftpSrv;
+FTPServer ftpSrv;
 
 //==============================================================================
 
@@ -355,8 +359,8 @@ void Manual_Set() {
       }
       // SET ボタン
       if (xt >= 20 && xt <= 150 && yt >= 195 && yt <= 235) {
-        // RTC に書き込み
-        m5::rtc_datetime_t newdt;
+        // RTC に書き込み (auto で型名依存を回避)
+        auto newdt = M5.Rtc.getDateTime();
         newdt.date.year   = year;
         newdt.date.month  = month;
         newdt.date.date   = day;
@@ -400,8 +404,11 @@ void Data_Dump_FTP() {
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
   WiFi.softAP("M5-SEISMO", "m5seismo");
 
-  // FTP サーバ起動 (user/pass は m5/m5)
-  ftpSrv.begin("m5", "m5");
+  // [U3] FTP サーバ起動 (ESP-FTP-Server-Lib API)
+  //      addUser/addFilesystem で動的に SD を登録、マクロ依存なし
+  ftpSrv.addUser("m5", "m5");
+  ftpSrv.addFilesystem("SD", &SD);
+  ftpSrv.begin();
 
   // 案内表示
   M5.Lcd.printf("SSID: M5-SEISMO\n");
@@ -418,7 +425,7 @@ void Data_Dump_FTP() {
 
   // FTP イベントループ(リセットまで戻らない)
   while (true) {
-    ftpSrv.handleFTP();
+    ftpSrv.handle();   // [U3] ESP-FTP-Server-Lib の API は handle() (旧 handleFTP() ではない)
     delay(1);
   }
 }
@@ -593,8 +600,7 @@ void TaskRead(void *pvParameters) {
   accData.reserve(ACCDATA_RESERVE);   // [C6 重量版] 初回 realloc を抑制
 
   // [B14] typo: "waite starting..." -> "waiting start..."
-  m5::rtc_datetime_t localDt;
-  localDt = M5.Rtc.getDateTime();
+  auto localDt = M5.Rtc.getDateTime();
   txtWrite("waiting start...", BLACK);
   while (localDt.time.seconds != 0) {
     delay(1);
@@ -688,7 +694,7 @@ void TaskSave(void *pvParameters) {
     // [B3] xQueueReceive の戻り値を確認。タイムアウト時は書き込みをスキップ
     if (xQueueReceive(xQueue, &recData, SDWriteTime * 1000 / portTICK_PERIOD_MS) != pdTRUE) {
       // タイムアウト: 時計表示だけ更新して継続
-      m5::rtc_datetime_t localDt = M5.Rtc.getDateTime();
+      auto localDt = M5.Rtc.getDateTime();
       portENTER_CRITICAL(&dtMux);
       dt = localDt;                                          // [B5]
       portEXIT_CRITICAL(&dtMux);
@@ -701,7 +707,7 @@ void TaskSave(void *pvParameters) {
     batchOkCount++;
 
     // [C5] 全画面 fillScreen を廃止し、変化フィールドだけ重ね描画
-    m5::rtc_datetime_t localDt = M5.Rtc.getDateTime();
+    auto localDt = M5.Rtc.getDateTime();
     portENTER_CRITICAL(&dtMux);
     dt = localDt;                                            // [B5]
     portEXIT_CRITICAL(&dtMux);
