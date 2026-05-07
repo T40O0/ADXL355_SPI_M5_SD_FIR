@@ -162,43 +162,54 @@ void createFile() {
 }
 //==============================================================================
 
-// [U4] WiFi 接続 + NTP 同期にタイムアウトを付与し、失敗を許容する
-//      戻り値: true=同期成功, false=失敗(WiFi 圏外等)
-bool tryNtpSync(uint32_t wifiTimeoutMs = 15000,
-                uint32_t sntpTimeoutMs = 15000) {
-  WiFi.begin();
-  uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED) {
-    if (millis() - t0 > wifiTimeoutMs) {
-      WiFi.disconnect(true);
-      return false;                              // WiFi 接続失敗
-    }
-    delay(200);
-  }
-  configTzTime(NTP_TIMEZONE, NTP_SERVER1, NTP_SERVER2, NTP_SERVER3);
-  t0 = millis();
-  #if SNTP_ENABLED
-    while (sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED) {
-      if (millis() - t0 > sntpTimeoutMs) {
-        WiFi.disconnect(true);
-        return false;                            // NTP 同期失敗
-      }
-      delay(500);
-    }
-  #else
-    delay(1600);
-    struct tm timeInfo;
-    if (!getLocalTime(&timeInfo, sntpTimeoutMs)) {
-      WiFi.disconnect(true);
-      return false;
-    }
-  #endif
+// [U4 削除] tryNtpSync (タイムアウト版) は元のハング動作に戻すため削除
 
-  time_t t = time(nullptr) + 1;
-  while (t > time(nullptr));
-  M5.Rtc.setDateTime(localtime(&t));
-  WiFi.disconnect(true);
-  return true;
+// [U2/Set_RTC 共通] 設定後の確認画面 (10 秒表示、RTC と ESP32 内部時計を比較)
+//      フォント大きめで読みやすく改善
+static void rtcConfirmScreen() {
+  static constexpr const char* const wd[7] = {"Sun","Mon","Tue","Wed","Thr","Fri","Sat"};
+  M5.Lcd.fillScreen(WHITE);
+  for (int i = 100; i > 0; --i) {
+    delay(100);
+    auto rtcDt = M5.Rtc.getDateTime();
+    auto sysT  = time(nullptr);
+    auto sysTm = localtime(&sysT);
+
+    // RTC 時刻 (font 4)
+    M5.Lcd.setTextFont(2);
+    M5.Lcd.setTextColor(BLACK, WHITE);
+    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.print("RTC time:");
+    M5.Lcd.setTextFont(4);
+    M5.Lcd.fillRect(0, 18, 320, 30, WHITE);
+    M5.Lcd.setCursor(0, 18);
+    M5.Lcd.printf("%04d/%02d/%02d (%s)",
+                  rtcDt.date.year, rtcDt.date.month, rtcDt.date.date, wd[rtcDt.date.weekDay]);
+    M5.Lcd.fillRect(0, 50, 320, 30, WHITE);
+    M5.Lcd.setCursor(0, 50);
+    M5.Lcd.printf("%02d:%02d:%02d",
+                  rtcDt.time.hours, rtcDt.time.minutes, rtcDt.time.seconds);
+
+    // ESP32 内部時計 (font 4)
+    M5.Lcd.setTextFont(2);
+    M5.Lcd.setCursor(0, 90);
+    M5.Lcd.print("ESP32 time:");
+    M5.Lcd.setTextFont(4);
+    M5.Lcd.fillRect(0, 108, 320, 30, WHITE);
+    M5.Lcd.setCursor(0, 108);
+    M5.Lcd.printf("%04d/%02d/%02d (%s)",
+                  sysTm->tm_year+1900, sysTm->tm_mon+1, sysTm->tm_mday, wd[sysTm->tm_wday]);
+    M5.Lcd.fillRect(0, 140, 320, 30, WHITE);
+    M5.Lcd.setCursor(0, 140);
+    M5.Lcd.printf("%02d:%02d:%02d",
+                  sysTm->tm_hour, sysTm->tm_min, sysTm->tm_sec);
+
+    // カウントダウン (font 2)
+    M5.Lcd.setTextFont(2);
+    M5.Lcd.fillRect(0, 200, 320, 20, WHITE);
+    M5.Lcd.setCursor(0, 200);
+    M5.Lcd.printf("Measurement starts in %d sec", i / 10);
+  }
 }
 
 //==============================================================================
@@ -206,6 +217,7 @@ void Set_RTC() {
   M5.Lcd.fillScreen(WHITE);
   M5.Lcd.setCursor(0,0);
   M5.Lcd.setTextColor(BLACK, WHITE);
+  M5.Lcd.setTextFont(2);
   if (!M5.Rtc.isEnabled())
   {
     M5.Lcd.println("RTC not found.");
@@ -214,50 +226,38 @@ void Set_RTC() {
   M5.Lcd.fillScreen(WHITE);
   M5.Lcd.setCursor(0,0);
   M5.Lcd.println("RTC found.");
-  M5.Lcd.println("Trying NTP sync...");
-  delay(500);
+  delay(1000);
 
-  // [U4] タイムアウト付き NTP 同期。失敗してもハングしない
-  bool ok = tryNtpSync();
-  if (!ok) {
-    M5.Lcd.fillScreen(RED);
-    M5.Lcd.setCursor(0, 0);
-    M5.Lcd.setTextColor(WHITE, RED);
-    M5.Lcd.println("NTP sync FAILED.");
-    M5.Lcd.println("Continue with");
-    M5.Lcd.println("current RTC.");
-    delay(2000);
-    return;
+  // [NTP 同期] 元のハング動作に戻す: 圏外なら永久に WiFi 接続待ち / NTP 同期待ち
+  M5.Lcd.setCursor(0,0);
+  M5.Lcd.print("WiFi: Searching.");
+  WiFi.begin();
+  while (WiFi.status() != WL_CONNECTED) {
+    M5.Lcd.print('.');
+    delay(1000);
   }
+  M5.Lcd.setCursor(0,0);
+  M5.Lcd.print("Wifi: Connected.");
 
-  // Show 10sec
-  M5.Lcd.fillScreen(WHITE);
-  for (int i = 100; i > 0; --i) {
-    static constexpr const char* const wd[7] = {"Sun","Mon","Tue","Wed","Thr","Fri","Sat"};
-    delay(100);
-    auto dtNow = M5.Rtc.getDateTime();
-    M5.Lcd.setCursor(0,0);
-    M5.Lcd.setTextColor(BLACK, WHITE);
-    M5.Lcd.printf("RTC   : %04d/%02d/%02d (%s) %02d: %02d: %02d"
-                , dtNow.date.year
-                , dtNow.date.month
-                , dtNow.date.date
-                , wd[dtNow.date.weekDay]
-                , dtNow.time.hours
-                , dtNow.time.minutes
-                , dtNow.time.seconds
-                );
-    auto t = time(nullptr);
-    auto tm = localtime(&t);
-    M5.Lcd.setCursor(0,30);
-    M5.Lcd.printf("ESP32: %04d/%02d/%02d (%s) %02d: %02d: %02d"
-          , tm->tm_year+1900, tm->tm_mon+1, tm->tm_mday
-          , wd[tm->tm_wday]
-          , tm->tm_hour, tm->tm_min, tm->tm_sec
-          );
-    M5.Lcd.setCursor(0,70);
-    M5.Lcd.print("The next program will start soon.");
-  }
+  configTzTime(NTP_TIMEZONE, NTP_SERVER1, NTP_SERVER2, NTP_SERVER3);
+
+  #if SNTP_ENABLED
+    while (sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED) {
+      delay(1000);
+    }
+  #else
+    delay(1600);
+    struct tm timeInfo;
+    while (!getLocalTime(&timeInfo, 1000)) {
+    };
+  #endif
+
+  time_t t = time(nullptr) + 1;
+  while (t > time(nullptr));
+  M5.Rtc.setDateTime(localtime(&t));
+
+  rtcConfirmScreen();
+  WiFi.disconnect(true);
 }
 //==============================================================================
 void Set_WiFi(){
@@ -281,22 +281,22 @@ void Set_WiFi(){
 //      画面に Y/M/D/h/m/s を一覧表示、各フィールドの上下ボタンで +/-
 //      [SET] で M5.Rtc.setDateTime に書き込み
 void Manual_Set() {
-  // 現在の RTC 値を取得して開始値とする
-  auto cur = M5.Rtc.getDateTime();
-  int year   = cur.date.year;
-  int month  = cur.date.month;
-  int day    = cur.date.date;
-  int hour   = cur.time.hours;
-  int minute = cur.time.minutes;
-  int second = cur.time.seconds;
+  // [U2 修正] 初期値は固定で 2026/01/01 00:00:00 (RTC の現在値は使わない)
+  int year   = 2026;
+  int month  = 1;
+  int day    = 1;
+  int hour   = 0;
+  int minute = 0;
+  int second = 0;
 
-  // ボタン配置(320x240 を想定):
-  //   年欄は 4 桁のため 80px 幅、月日時分秒は 2 桁のため 44px 幅
-  //   [Year=80][Mon=44][Day=44][Hour=44][Min=44][Sec=44] = 300px (中央寄せで余白 10px ずつ)
-  const int xs[6]   = { 10,  95, 144, 193, 242, 291 };
-  const int colW[6] = { 80,  44,  44,  44,  44,  29 };  // Sec は端なので少し狭め
-  const int upY  = 40;
-  const int dnY  = 140;
+  // ボタン配置(320x240):
+  //   年欄 70px (4 桁)、月日時分秒 各 50px (2 桁、原版と同じ幅)
+  //   [Year=70][Mon=50][Day=50][Hour=50][Min=50][Sec=40] = 310px (左マージン 5px)
+  const int xs[6]   = {   5,  80, 132, 184, 236, 288 };
+  const int colW[6] = {  70,  48,  48,  48,  48,  30 };
+  // [U2 修正] SET ボタン誤タップ防止のため、Down ボタンを上に移動 (ギャップ 35px 確保)
+  const int upY  = 30;
+  const int dnY  = 120;
   const int btnH = 40;
 
   auto drawAll = [&](){
@@ -318,20 +318,20 @@ void Manual_Set() {
       M5.Lcd.setTextColor(BLACK, ORANGE);
       M5.Lcd.print("-");
     }
-    // ヘッダ
+    // ヘッダ (列名)
     M5.Lcd.setTextColor(BLACK, WHITE);
     const char *hdr[6] = {"Year", "Mon", "Day", "Hour", "Min", "Sec"};
     for (int i = 0; i < 6; i++) {
-      M5.Lcd.setCursor(xs[i] + 4, 20);
+      M5.Lcd.setCursor(xs[i] + 4, 5);     // [U2 修正] 上端寄せ (上ボタンと重ならない)
       M5.Lcd.print(hdr[i]);
     }
-    // 値表示 (年は font 4 / 4桁、他は font 4 / 2桁)
+    // 値表示 (年は 4 桁、他は 2 桁) 上下ボタンの間 (y=80 付近)
     M5.Lcd.setTextFont(4);
     char buf[8];
     int vals[6] = {year, month, day, hour, minute, second};
     for (int i = 0; i < 6; i++) {
-      M5.Lcd.fillRect(xs[i], 90, colW[i], 40, WHITE);
-      M5.Lcd.setCursor(xs[i] + 4, 95);
+      M5.Lcd.fillRect(xs[i], 75, colW[i], 40, WHITE);
+      M5.Lcd.setCursor(xs[i] + 2, 80);
       if (i == 0) sprintf(buf, "%04d", vals[i]);
       else        sprintf(buf, "%02d", vals[i]);
       M5.Lcd.print(buf);
@@ -399,28 +399,20 @@ void Manual_Set() {
         newdt.time.seconds= second;
         M5.Rtc.setDateTime(&newdt);
 
-        // [U2] Set_RTC と同じ 10 秒の確認画面 (RTC と ESP32 内部時計を表示)
-        M5.Lcd.fillScreen(WHITE);
-        for (int i = 100; i > 0; --i) {
-          static constexpr const char* const wd[7] = {"Sun","Mon","Tue","Wed","Thr","Fri","Sat"};
-          delay(100);
-          auto dtNow = M5.Rtc.getDateTime();
-          M5.Lcd.setCursor(0, 0);
-          M5.Lcd.setTextFont(2);
-          M5.Lcd.setTextColor(BLACK, WHITE);
-          M5.Lcd.printf("RTC   : %04d/%02d/%02d (%s) %02d:%02d:%02d"
-                      , dtNow.date.year
-                      , dtNow.date.month
-                      , dtNow.date.date
-                      , wd[dtNow.date.weekDay]
-                      , dtNow.time.hours
-                      , dtNow.time.minutes
-                      , dtNow.time.seconds);
-          M5.Lcd.setCursor(0, 30);
-          M5.Lcd.println("Manual time set OK.");
-          M5.Lcd.setCursor(0, 60);
-          M5.Lcd.print("Measurement starts soon.");
-        }
+        // ESP32 内部時計も同期しておく(rtcConfirmScreen で照合表示するため)
+        struct tm tmSet = {};
+        tmSet.tm_year = year - 1900;
+        tmSet.tm_mon  = month - 1;
+        tmSet.tm_mday = day;
+        tmSet.tm_hour = hour;
+        tmSet.tm_min  = minute;
+        tmSet.tm_sec  = second;
+        time_t tt = mktime(&tmSet);
+        struct timeval tv = { tt, 0 };
+        settimeofday(&tv, nullptr);
+
+        // [U2] Set_RTC と共通の確認画面 (10 秒、フォント大)
+        rtcConfirmScreen();
         return;
       }
       // CANCEL ボタン
@@ -513,11 +505,14 @@ static void handleDownload() {
   f.close();
 }
 
-// [U3] ZIP ストリーミング本体: ファイルパスのリストを ZIP として client に書き出す
+// [U3] ZIP ストリーミング本体: ファイルパスのリストを ZIP として送出
 //      無圧縮 (store) 形式。ZIP-32 (4GB 以下) 対応
-static void streamZip(WiFiClient &client, const std::vector<String> &fullPaths, const std::vector<String> &archiveNames) {
+//      [U3 修正] httpSrv.sendContent() を使う (chunked encoding を WebServer に任せる)
+//                生 client.write() だと CONTENT_LENGTH_UNKNOWN 時の chunk フレーミングが
+//                付かず HTTP 不正でブラウザがエラー → DL 失敗する
+static void streamZip(const std::vector<String> &fullPaths, const std::vector<String> &archiveNames) {
   crc32Init();
-  String centralDir;          // 全エントリの central directory (バッファ)
+  String centralDir;
   centralDir.reserve(fullPaths.size() * 80);
   uint32_t totalOffset = 0;
 
@@ -541,33 +536,32 @@ static void streamZip(WiFiClient &client, const std::vector<String> &fullPaths, 
     const String &name = archiveNames[idx];
     uint16_t nameLen = name.length();
 
-    // Local file header (30 byte + filename)
+    // Local file header
     memset(hdr, 0, 30);
-    hdr[0]=0x50; hdr[1]=0x4b; hdr[2]=0x03; hdr[3]=0x04;   // signature
-    hdr[4]=20;                                              // version
-    // flags=0, method=0 (store), time=0, date=0x21 (1980-01-01)
+    hdr[0]=0x50; hdr[1]=0x4b; hdr[2]=0x03; hdr[3]=0x04;
+    hdr[4]=20;
     hdr[12]=0x21;
     hdr[14]= crc        & 0xFF; hdr[15]=(crc>>8)&0xFF; hdr[16]=(crc>>16)&0xFF; hdr[17]=(crc>>24)&0xFF;
     hdr[18]= size       & 0xFF; hdr[19]=(size>>8)&0xFF; hdr[20]=(size>>16)&0xFF; hdr[21]=(size>>24)&0xFF;
     hdr[22]= size       & 0xFF; hdr[23]=(size>>8)&0xFF; hdr[24]=(size>>16)&0xFF; hdr[25]=(size>>24)&0xFF;
     hdr[26]= nameLen    & 0xFF; hdr[27]=(nameLen>>8)&0xFF;
-    client.write(hdr, 30);
-    client.write((const uint8_t*)name.c_str(), nameLen);
+    httpSrv.sendContent((const char*)hdr, 30);
+    httpSrv.sendContent(name);
 
     // ファイル本体ストリーミング
     while (f.available()) {
       int n = f.read(buf, sizeof(buf));
       if (n <= 0) break;
-      client.write(buf, n);
+      httpSrv.sendContent((const char*)buf, n);
     }
     f.close();
 
-    // Central directory entry (46 byte + filename) をバッファ追記
+    // Central directory entry をバッファ追記
     uint8_t cd[46];
     memset(cd, 0, 46);
-    cd[0]=0x50; cd[1]=0x4b; cd[2]=0x01; cd[3]=0x02;        // CD signature
-    cd[4]=20; cd[6]=20;                                     // version made by / needed
-    cd[12]=0x21;                                            // date
+    cd[0]=0x50; cd[1]=0x4b; cd[2]=0x01; cd[3]=0x02;
+    cd[4]=20; cd[6]=20;
+    cd[12]=0x21;
     cd[16]= crc        & 0xFF; cd[17]=(crc>>8)&0xFF; cd[18]=(crc>>16)&0xFF; cd[19]=(crc>>24)&0xFF;
     cd[20]= size       & 0xFF; cd[21]=(size>>8)&0xFF; cd[22]=(size>>16)&0xFF; cd[23]=(size>>24)&0xFF;
     cd[24]= size       & 0xFF; cd[25]=(size>>8)&0xFF; cd[26]=(size>>16)&0xFF; cd[27]=(size>>24)&0xFF;
@@ -582,9 +576,11 @@ static void streamZip(WiFiClient &client, const std::vector<String> &fullPaths, 
   // Central directory 全体を送信
   uint32_t cdSize = centralDir.length();
   uint32_t cdOffset = totalOffset;
-  client.write((const uint8_t*)centralDir.c_str(), cdSize);
+  if (cdSize > 0) {
+    httpSrv.sendContent(centralDir.c_str(), cdSize);
+  }
 
-  // End of Central Directory record (22 byte)
+  // End of Central Directory record
   uint8_t eocd[22];
   memset(eocd, 0, 22);
   eocd[0]=0x50; eocd[1]=0x4b; eocd[2]=0x05; eocd[3]=0x06;
@@ -593,8 +589,10 @@ static void streamZip(WiFiClient &client, const std::vector<String> &fullPaths, 
   eocd[10]= entries  & 0xFF; eocd[11]=(entries>>8)&0xFF;
   eocd[12]= cdSize   & 0xFF; eocd[13]=(cdSize>>8)&0xFF; eocd[14]=(cdSize>>16)&0xFF; eocd[15]=(cdSize>>24)&0xFF;
   eocd[16]= cdOffset & 0xFF; eocd[17]=(cdOffset>>8)&0xFF; eocd[18]=(cdOffset>>16)&0xFF; eocd[19]=(cdOffset>>24)&0xFF;
-  client.write(eocd, 22);
-  client.flush();
+  httpSrv.sendContent((const char*)eocd, 22);
+
+  // chunked 終端 (空 chunk)
+  httpSrv.sendContent("");
 }
 
 // [U3] /zip?p=<folder>: 指定フォルダ内の全ファイルを ZIP で DL
@@ -618,9 +616,7 @@ static void handleZipFolder() {
   httpSrv.sendHeader("Connection", "close");
   httpSrv.setContentLength(CONTENT_LENGTH_UNKNOWN);
   httpSrv.send(200, "application/zip", "");
-  WiFiClient client = httpSrv.client();
-  streamZip(client, fullPaths, archiveNames);
-  client.stop();
+  streamZip(fullPaths, archiveNames);
 }
 
 // [U3] /zipall: SD ルート以下の全ファイルを再帰的に ZIP
@@ -647,9 +643,7 @@ static void handleZipAll() {
   httpSrv.sendHeader("Connection", "close");
   httpSrv.setContentLength(CONTENT_LENGTH_UNKNOWN);
   httpSrv.send(200, "application/zip", "");
-  WiFiClient client = httpSrv.client();
-  streamZip(client, fullPaths, archiveNames);
-  client.stop();
+  streamZip(fullPaths, archiveNames);
 }
 
 // [U3] Data Dump モード: SoftAP + HTTP サーバ
@@ -749,19 +743,22 @@ void setup() {
     {"Manual Set",    btnY0 + 2 * (btnH + btnGap)},
     {"Data Dump",     btnY0 + 3 * (btnH + btnGap)},
   };
-  // ボタン描画
+  // ボタン描画 (font 4 で読みやすく、太字感のある表示)
   for (int i = 0; i < 4; i++) {
     M5.Lcd.fillRoundRect(btnX,     btns[i].y,     btnW,     btnH,     btnR, RED);
     M5.Lcd.fillRoundRect(btnX + 4, btns[i].y + 4, btnW - 8, btnH - 8, btnR, ORANGE);
-    M5.Lcd.setTextFont(2);
+    M5.Lcd.setTextFont(4);
     M5.Lcd.setTextColor(BLACK, ORANGE);
-    M5.Lcd.setCursor(btnX + 30, btns[i].y + 10);
+    // ラベルを中央寄せ気味に (font 4 は char 幅 ~13px)
+    int textX = btnX + (btnW - (int)strlen(btns[i].label) * 13) / 2;
+    if (textX < btnX + 5) textX = btnX + 5;
+    M5.Lcd.setCursor(textX, btns[i].y + 8);
     M5.Lcd.print(btns[i].label);
   }
   M5.Lcd.setTextColor(BLACK, WHITE);
 
   // 30 秒カウントダウン (タップ無しでスキップ)
-  // [B7] 300 ループ x 100ms = 30 秒。実時間と一致
+  // [B7] 300 ループ x 100ms = 30 秒
   for (int i = 300; i > 0; --i) {
     M5.update();
     auto td = M5.Touch.getDetail();
@@ -784,13 +781,15 @@ void setup() {
     }
     if (dispatched) break;
 
-    M5.Lcd.setCursor(0, 0);
-    M5.Lcd.setTextFont(2);
+    // [U1 改善] font 4 で大きく表示。ヘッダ "Tap a button:" は上部、カウントダウンは下部
+    M5.Lcd.setTextFont(4);
     M5.Lcd.setTextColor(BLACK, WHITE);
+    M5.Lcd.setCursor(0, 5);
     M5.Lcd.print("Tap a button:");
-    M5.Lcd.setCursor(0, 220);
-    M5.Lcd.printf("Wait... %3d sec", i / 10);   // 秒単位表示
-    delay(100);             // [B7] 表示と実時間を一致させるため delay 追加
+    M5.Lcd.fillRect(0, 215, 320, 25, WHITE);   // 下端の数字エリアをクリアしてから描画
+    M5.Lcd.setCursor(0, 215);
+    M5.Lcd.printf("Wait... %3d sec", i / 10);
+    delay(100);
   }
   //==============================================================================
 
