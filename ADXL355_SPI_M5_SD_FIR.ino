@@ -643,8 +643,14 @@ static void streamZip(const String &zipName,
   eocd[16]= cdOffset& 0xFF; eocd[17]=(cdOffset>>8)&0xFF; eocd[18]=(cdOffset>>16)&0xFF; eocd[19]=(cdOffset>>24)&0xFF;
   httpSrv.sendContent((const char*)eocd, 22);
 
-  // End the chunked stream (empty chunk).
+  // End the chunked stream (empty chunk) and close the connection so the
+  // browser detects EOF immediately. Without the explicit stop() some
+  // browsers (Vivaldi) keep the download in a waiting state even after
+  // the final chunk arrived.
   httpSrv.sendContent("");
+  httpSrv.client().flush();
+  delay(50);
+  httpSrv.client().stop();
 }
 
 static void handleZipFolder() {
