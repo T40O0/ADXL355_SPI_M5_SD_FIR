@@ -39,7 +39,7 @@
 //   100 Hz : ADXL355 ODR=500 Hz, 201-tap FIR, 50 Hz cutoff (FIR500_cut50.csv).
 //   500 Hz : ADXL355 ODR=1000 Hz, 80-tap minimum-phase FIR (Telemetra min500.cf,
 //            passband 200 Hz, stopband 250 Hz @ -120 dB).
-#define SAMPLE_HZ 100
+#define SAMPLE_HZ 500
 
 unsigned int hz = SAMPLE_HZ;
 unsigned int dtWrite = 1000 / hz;
@@ -558,10 +558,11 @@ static void streamZip(const String &zipName,
   httpSrv.sendHeader("Content-Type", "application/zip");
   httpSrv.sendHeader("Content-Disposition", "attachment; filename=\"" + zipName + "\"");
   httpSrv.sendHeader("Connection", "close");
-  httpSrv.setContentLength(totalSize);
+  // Chunked transfer (CONTENT_LENGTH_UNKNOWN). httpSrv.sendContent() then
+  // frames each chunk properly, which is what browsers expect when the
+  // body length is not known in advance.
+  httpSrv.setContentLength(CONTENT_LENGTH_UNKNOWN);
   httpSrv.send(200, "application/zip", "");
-  WiFiClient client = httpSrv.client();
-  client.setNoDelay(true);
 
   String centralDir;
   centralDir.reserve(cdSize);
@@ -578,13 +579,13 @@ static void streamZip(const String &zipName,
 
     // Local file header (CRC=0, sizes=0, flag bit 3 = data descriptor follows)
     memset(hdr, 0, 30);
-    hdr[0]=0x50; hdr[1]=0x4b; hdr[2]=0x03; hdr[3]=0x04;   // signature
-    hdr[4]=20;                                              // version
-    hdr[6]=0x08;                                            // flag bit 3
-    hdr[12]=0x21;                                           // mod date placeholder
+    hdr[0]=0x50; hdr[1]=0x4b; hdr[2]=0x03; hdr[3]=0x04;
+    hdr[4]=20;
+    hdr[6]=0x08;
+    hdr[12]=0x21;
     hdr[26]= namelen & 0xFF; hdr[27]=(namelen>>8)&0xFF;
-    client.write(hdr, 30);
-    client.write((const uint8_t*)name.c_str(), namelen);
+    httpSrv.sendContent((const char*)hdr, 30);
+    httpSrv.sendContent(name);
 
     File f = SD.open(fullPaths[i]);
     uint32_t crc = 0;
@@ -597,8 +598,9 @@ static void streamZip(const String &zipName,
         n = want;
       }
       crc = crc32Update(crc, buf, n);
-      client.write(buf, n);
+      httpSrv.sendContent((const char*)buf, n);
       remaining -= n;
+      yield();
     }
     f.close();
 
@@ -607,13 +609,13 @@ static void streamZip(const String &zipName,
     dd[4]= crc       & 0xFF; dd[5]=(crc>>8)&0xFF; dd[6]=(crc>>16)&0xFF; dd[7]=(crc>>24)&0xFF;
     dd[8]= size      & 0xFF; dd[9]=(size>>8)&0xFF; dd[10]=(size>>16)&0xFF; dd[11]=(size>>24)&0xFF;
     dd[12]=size      & 0xFF; dd[13]=(size>>8)&0xFF; dd[14]=(size>>16)&0xFF; dd[15]=(size>>24)&0xFF;
-    client.write(dd, 16);
+    httpSrv.sendContent((const char*)dd, 16);
 
     uint8_t cd[46];
     memset(cd, 0, 46);
     cd[0]=0x50; cd[1]=0x4b; cd[2]=0x01; cd[3]=0x02;
     cd[4]=20; cd[6]=20;
-    cd[8]=0x08;                                       // flag bit 3
+    cd[8]=0x08;
     cd[12]=0x21;
     cd[16]= crc       & 0xFF; cd[17]=(crc>>8)&0xFF; cd[18]=(crc>>16)&0xFF; cd[19]=(crc>>24)&0xFF;
     cd[20]= size      & 0xFF; cd[21]=(size>>8)&0xFF; cd[22]=(size>>16)&0xFF; cd[23]=(size>>24)&0xFF;
@@ -628,7 +630,7 @@ static void streamZip(const String &zipName,
 
   uint32_t cdOffset = totalOffset;
   if (centralDir.length() > 0) {
-    client.write((const uint8_t*)centralDir.c_str(), centralDir.length());
+    httpSrv.sendContent(centralDir.c_str(), centralDir.length());
   }
 
   // End of Central Directory record (22 byte)
@@ -639,9 +641,10 @@ static void streamZip(const String &zipName,
   eocd[10]= entries & 0xFF; eocd[11]=(entries>>8)&0xFF;
   eocd[12]= cdSize  & 0xFF; eocd[13]=(cdSize>>8)&0xFF; eocd[14]=(cdSize>>16)&0xFF; eocd[15]=(cdSize>>24)&0xFF;
   eocd[16]= cdOffset& 0xFF; eocd[17]=(cdOffset>>8)&0xFF; eocd[18]=(cdOffset>>16)&0xFF; eocd[19]=(cdOffset>>24)&0xFF;
-  client.write(eocd, 22);
-  client.flush();
-  client.stop();
+  httpSrv.sendContent((const char*)eocd, 22);
+
+  // End the chunked stream (empty chunk).
+  httpSrv.sendContent("");
 }
 
 static void handleZipFolder() {
