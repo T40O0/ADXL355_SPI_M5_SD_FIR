@@ -136,6 +136,8 @@ static void crc32Init() {
   }
   crc32TableReady = true;
 }
+//==============================================================================
+
 static uint32_t crc32Update(uint32_t crc, const uint8_t *data, size_t len) {
   crc = ~crc;
   while (len--) crc = crc32Table[(crc ^ *data++) & 0xFF] ^ (crc >> 8);
@@ -479,6 +481,7 @@ static void listDir(const String &path,
   }
   dir.close();
 }
+//==============================================================================
 
 static void handleRoot() {
   std::vector<String> files, dirs;
@@ -502,6 +505,7 @@ static void handleRoot() {
   html += F("</ul></body></html>");
   httpSrv.send(200, "text/html; charset=utf-8", html);
 }
+//==============================================================================
 
 static void handleFolder() {
   String p = httpSrv.arg("p");
@@ -523,6 +527,7 @@ static void handleFolder() {
   html += F("</ul></body></html>");
   httpSrv.send(200, "text/html; charset=utf-8", html);
 }
+//==============================================================================
 
 static void handleDownload() {
   String p = httpSrv.arg("p");
@@ -535,6 +540,7 @@ static void handleDownload() {
   httpSrv.streamFile(f, "text/csv");
   f.close();
 }
+//==============================================================================
 
 // Streams a ZIP archive of the given files.
 static void streamZip(const String &zipName,
@@ -680,6 +686,7 @@ static void streamZip(const String &zipName,
   client.flush();
   client.stop();
 }
+//==============================================================================
 
 static void handleZipFolder() {
   String p = httpSrv.arg("p");
@@ -697,6 +704,7 @@ static void handleZipFolder() {
   }
   streamZip(zipName, fullPaths, archiveNames, sizes);
 }
+//==============================================================================
 
 static void handleZipAll() {
   std::vector<String> fullPaths, archiveNames;
@@ -722,6 +730,7 @@ static void handleZipAll() {
   }
   streamZip("all.zip", fullPaths, archiveNames, sizes);
 }
+//==============================================================================
 
 // Data Dump mode: SoftAP + HTTP server.
 // Open http://192.168.4.1 in a browser for file listing,
