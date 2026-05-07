@@ -68,9 +68,16 @@ unsigned int BufIndex = 0;
 // [C6 重量版] accData の初期容量。1 行 ~30 byte * (hz*SDWriteTime) 行 + マージン
 const size_t ACCDATA_RESERVE = 60000;
 
-// [B4] 送信ドロップ件数を LCD に表示するためのカウンタ
+// [B4] 送信ドロップ件数(欠測バッチ数) と OK 件数 (LCD 表示用)
+//      DROP は SD 書き込みが追いつかずキューが満杯になった時に発生する欠測数
 volatile uint32_t dropCount = 0;
 volatile uint32_t batchOkCount = 0;
+
+// [C5] 最新の FIR 出力 (LCD で振動データ確認用)
+//      TaskRead が更新、TaskSave が読む。並行アクセスは表示用なので保護不要
+double latestX = 0.0;
+double latestY = 0.0;
+double latestZ = 0.0;
 
 //==============================================================================
 
@@ -283,10 +290,11 @@ void Manual_Set() {
   int minute = cur.time.minutes;
   int second = cur.time.seconds;
 
-  // ボタン配置(320x240 を想定): 6 列 x (上ボタン / 値 / 下ボタン) + 下段に SET/CANCEL
-  // 列幅 50px (offset 10px から 6 列 = 60..360 を 320 内に収める)
-  const int colW = 50;
-  const int xs[6] = {10, 60, 110, 160, 210, 260};
+  // ボタン配置(320x240 を想定):
+  //   年欄は 4 桁のため 80px 幅、月日時分秒は 2 桁のため 44px 幅
+  //   [Year=80][Mon=44][Day=44][Hour=44][Min=44][Sec=44] = 300px (中央寄せで余白 10px ずつ)
+  const int xs[6]   = { 10,  95, 144, 193, 242, 291 };
+  const int colW[6] = { 80,  44,  44,  44,  44,  29 };  // Sec は端なので少し狭め
   const int upY  = 40;
   const int dnY  = 140;
   const int btnH = 40;
@@ -298,31 +306,34 @@ void Manual_Set() {
 
     // 上ボタン
     for (int i = 0; i < 6; i++) {
-      M5.Lcd.fillRoundRect(xs[i], upY, colW-4, btnH, 5, ORANGE);
-      M5.Lcd.setCursor(xs[i] + (colW-4)/2 - 5, upY + btnH/2 - 8);
+      M5.Lcd.fillRoundRect(xs[i], upY, colW[i], btnH, 5, ORANGE);
+      M5.Lcd.setCursor(xs[i] + colW[i]/2 - 5, upY + btnH/2 - 8);
+      M5.Lcd.setTextColor(BLACK, ORANGE);
       M5.Lcd.print("+");
     }
     // 下ボタン
     for (int i = 0; i < 6; i++) {
-      M5.Lcd.fillRoundRect(xs[i], dnY, colW-4, btnH, 5, ORANGE);
-      M5.Lcd.setCursor(xs[i] + (colW-4)/2 - 5, dnY + btnH/2 - 8);
+      M5.Lcd.fillRoundRect(xs[i], dnY, colW[i], btnH, 5, ORANGE);
+      M5.Lcd.setCursor(xs[i] + colW[i]/2 - 5, dnY + btnH/2 - 8);
+      M5.Lcd.setTextColor(BLACK, ORANGE);
       M5.Lcd.print("-");
     }
     // ヘッダ
+    M5.Lcd.setTextColor(BLACK, WHITE);
     const char *hdr[6] = {"Year", "Mon", "Day", "Hour", "Min", "Sec"};
     for (int i = 0; i < 6; i++) {
       M5.Lcd.setCursor(xs[i] + 4, 20);
       M5.Lcd.print(hdr[i]);
     }
-    // 値表示
+    // 値表示 (年は font 4 / 4桁、他は font 4 / 2桁)
     M5.Lcd.setTextFont(4);
     char buf[8];
     int vals[6] = {year, month, day, hour, minute, second};
     for (int i = 0; i < 6; i++) {
-      sprintf(buf, "%02d", vals[i] % 100);  // 月日時分秒は 2 桁
-      if (i == 0) sprintf(buf, "%04d", vals[i]); // 年は 4 桁(枠は狭いので一部はみ出す)
-      M5.Lcd.fillRect(xs[i], 90, colW-4, 40, WHITE);
+      M5.Lcd.fillRect(xs[i], 90, colW[i], 40, WHITE);
       M5.Lcd.setCursor(xs[i] + 4, 95);
+      if (i == 0) sprintf(buf, "%04d", vals[i]);
+      else        sprintf(buf, "%02d", vals[i]);
       M5.Lcd.print(buf);
     }
     // SET / CANCEL
@@ -362,7 +373,7 @@ void Manual_Set() {
 
       // 上ボタン判定
       for (int i = 0; i < 6; i++) {
-        if (xt >= xs[i] && xt <= xs[i] + colW - 4 &&
+        if (xt >= xs[i] && xt <= xs[i] + colW[i] &&
             yt >= upY  && yt <= upY  + btnH) {
           adjust(i, +1);
           drawAll();
@@ -370,7 +381,7 @@ void Manual_Set() {
       }
       // 下ボタン判定
       for (int i = 0; i < 6; i++) {
-        if (xt >= xs[i] && xt <= xs[i] + colW - 4 &&
+        if (xt >= xs[i] && xt <= xs[i] + colW[i] &&
             yt >= dnY  && yt <= dnY  + btnH) {
           adjust(i, -1);
           drawAll();
@@ -388,12 +399,28 @@ void Manual_Set() {
         newdt.time.seconds= second;
         M5.Rtc.setDateTime(&newdt);
 
-        M5.Lcd.fillScreen(GREEN);
-        M5.Lcd.setTextColor(BLACK, GREEN);
-        M5.Lcd.setCursor(0, 0);
-        M5.Lcd.printf("RTC set:\n%04d/%02d/%02d %02d:%02d:%02d",
-                      year, month, day, hour, minute, second);
-        delay(2000);
+        // [U2] Set_RTC と同じ 10 秒の確認画面 (RTC と ESP32 内部時計を表示)
+        M5.Lcd.fillScreen(WHITE);
+        for (int i = 100; i > 0; --i) {
+          static constexpr const char* const wd[7] = {"Sun","Mon","Tue","Wed","Thr","Fri","Sat"};
+          delay(100);
+          auto dtNow = M5.Rtc.getDateTime();
+          M5.Lcd.setCursor(0, 0);
+          M5.Lcd.setTextFont(2);
+          M5.Lcd.setTextColor(BLACK, WHITE);
+          M5.Lcd.printf("RTC   : %04d/%02d/%02d (%s) %02d:%02d:%02d"
+                      , dtNow.date.year
+                      , dtNow.date.month
+                      , dtNow.date.date
+                      , wd[dtNow.date.weekDay]
+                      , dtNow.time.hours
+                      , dtNow.time.minutes
+                      , dtNow.time.seconds);
+          M5.Lcd.setCursor(0, 30);
+          M5.Lcd.println("Manual time set OK.");
+          M5.Lcd.setCursor(0, 60);
+          M5.Lcd.print("Measurement starts soon.");
+        }
         return;
       }
       // CANCEL ボタン
@@ -635,6 +662,23 @@ void Data_Dump_HTTP() {
   M5.Lcd.println("Data Dump (AP+HTTP)");
   M5.Lcd.println();
 
+  // [U3 修正] Data Dump は setup() 中の startup menu から呼ばれ、
+  //          まだ SD.begin() していないため、ここで初期化する
+  M5.Lcd.print("Init SD...");
+  uint32_t t0 = millis();
+  while (!SD.begin(GPIO_NUM_4, SPI, 10000000)) {
+    if (millis() - t0 > 5000) {
+      M5.Lcd.fillScreen(RED);
+      M5.Lcd.setCursor(0, 0);
+      M5.Lcd.setTextColor(WHITE, RED);
+      M5.Lcd.println("SD INIT FAILED.");
+      M5.Lcd.println("Reset to retry.");
+      while (true) delay(1000);
+    }
+    delay(100);
+  }
+  M5.Lcd.println(" OK");
+
   // SoftAP 起動
   WiFi.mode(WIFI_AP);
   IPAddress apIP(192, 168, 4, 1);
@@ -717,8 +761,8 @@ void setup() {
   M5.Lcd.setTextColor(BLACK, WHITE);
 
   // 30 秒カウントダウン (タップ無しでスキップ)
-  // [B7] 100 ループ x 100ms = 約 10 秒。表示の "30 sec" は誤記なので "Wait..." に変更
-  for (int i = 100; i > 0; --i) {
+  // [B7] 300 ループ x 100ms = 30 秒。実時間と一致
+  for (int i = 300; i > 0; --i) {
     M5.update();
     auto td = M5.Touch.getDetail();
     int xt = td.x, yt = td.y;
@@ -745,7 +789,7 @@ void setup() {
     M5.Lcd.setTextColor(BLACK, WHITE);
     M5.Lcd.print("Tap a button:");
     M5.Lcd.setCursor(0, 220);
-    M5.Lcd.printf("Wait... %3d", i);
+    M5.Lcd.printf("Wait... %3d sec", i / 10);   // 秒単位表示
     delay(100);             // [B7] 表示と実時間を一致させるため delay 追加
   }
   //==============================================================================
@@ -894,6 +938,11 @@ void TaskRead(void *pvParameters) {
     Serial.print(", ");
     Serial.println(AccFirZ);
 
+    // [C5] 最新値を LCD 表示用にコピー (リセット前)
+    latestX = AccFirX;
+    latestY = AccFirY;
+    latestZ = AccFirZ;
+
     AccFirX = 0;
     AccFirY = 0;
     AccFirZ = 0;
@@ -921,15 +970,9 @@ void TaskSave(void *pvParameters) {
 
   delay(5);
 
-  // [C5] LCD 部分更新の状態保持。前回値と異なる時だけ書き換える
-  char prevTime[32] = "";
-  uint32_t prevOk = 0xFFFFFFFFu;
-  uint32_t prevDrop = 0xFFFFFFFFu;
-
   for (;;) {
     // [B3] xQueueReceive の戻り値を確認。タイムアウト時は書き込みをスキップ
     if (xQueueReceive(xQueue, &recData, SDWriteTime * 1000 / portTICK_PERIOD_MS) != pdTRUE) {
-      // タイムアウト: 時計表示だけ更新して継続
       auto localDt = M5.Rtc.getDateTime();
       portENTER_CRITICAL(&dtMux);
       dt = localDt;                                          // [B5]
@@ -942,40 +985,40 @@ void TaskSave(void *pvParameters) {
     f.close();
     batchOkCount++;
 
-    // [C5] 全画面 fillScreen を廃止し、変化フィールドだけ重ね描画
     auto localDt = M5.Rtc.getDateTime();
     portENTER_CRITICAL(&dtMux);
     dt = localDt;                                            // [B5]
     portEXIT_CRITICAL(&dtMux);
 
-    char nowStr[32];
-    sprintf(nowStr, "%04d/%02d/%02d %02d:%02d:%02d",
-            localDt.date.year, localDt.date.month, localDt.date.date,
-            localDt.time.hours, localDt.time.minutes, localDt.time.seconds);
-
-    M5.Lcd.setTextFont(4);
+    // [C5] 焼付き対策: 1 バッチ毎に 3 秒だけ表示し、その後画面消灯
+    //      表示内容: 時刻 / 最新 XYZ (振動データ確認用) / OK 件数 / DROP 欠測数 (>0 で赤)
+    M5.Lcd.fillScreen(BLACK);
     M5.Lcd.setTextColor(WHITE, BLACK);
-    if (strcmp(nowStr, prevTime) != 0) {
-      M5.Lcd.fillRect(0, 0, 320, 30, BLACK);     // 時刻表示エリアのみクリア
-      M5.Lcd.setCursor(0, 0);
-      M5.Lcd.print(nowStr);
-      strcpy(prevTime, nowStr);
-    }
-    if (batchOkCount != prevOk) {
-      M5.Lcd.fillRect(0, 40, 320, 30, BLACK);
-      M5.Lcd.setCursor(0, 40);
-      M5.Lcd.printf("OK : %lu", (unsigned long)batchOkCount);
-      prevOk = batchOkCount;
-    }
-    if (dropCount != prevDrop) {
-      // [B4] ドロップ件数表示 (0 でなければ赤字で警告)
-      M5.Lcd.fillRect(0, 70, 320, 30, BLACK);
-      M5.Lcd.setTextColor(dropCount ? RED : WHITE, BLACK);
-      M5.Lcd.setCursor(0, 70);
-      M5.Lcd.printf("DROP: %lu", (unsigned long)dropCount);
-      M5.Lcd.setTextColor(WHITE, BLACK);
-      prevDrop = dropCount;
-    }
+    M5.Lcd.setTextFont(4);
+    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.printf("%04d/%02d/%02d %02d:%02d:%02d",
+                  localDt.date.year, localDt.date.month, localDt.date.date,
+                  localDt.time.hours, localDt.time.minutes, localDt.time.seconds);
+
+    M5.Lcd.setTextFont(2);
+    M5.Lcd.setCursor(0, 40);
+    M5.Lcd.printf("X: %8.2f cm/s2", latestX);
+    M5.Lcd.setCursor(0, 60);
+    M5.Lcd.printf("Y: %8.2f cm/s2", latestY);
+    M5.Lcd.setCursor(0, 80);
+    M5.Lcd.printf("Z: %8.2f cm/s2", latestZ);
+
+    M5.Lcd.setCursor(0, 110);
+    M5.Lcd.printf("OK  : %lu", (unsigned long)batchOkCount);
+    // [B4] DROP は欠測バッチ数 (SD 書き込み遅延でキュー満杯時にカウント)
+    M5.Lcd.setCursor(0, 130);
+    M5.Lcd.setTextColor(dropCount ? RED : WHITE, BLACK);
+    M5.Lcd.printf("DROP: %lu", (unsigned long)dropCount);
+    M5.Lcd.setTextColor(WHITE, BLACK);
+
+    // 約 3 秒表示 → 消灯 (15s 周期のうち 3s 点灯、12s 消灯で焼付き軽減)
+    delay(SDWriteTime * 1000 / 5);
+    M5.Lcd.fillScreen(BLACK);
 
     delete recData;     // [B2] 受信した String* を解放
     recData = nullptr;
