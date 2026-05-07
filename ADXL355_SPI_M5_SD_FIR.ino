@@ -548,17 +548,19 @@ static void streamZip(const String &zipName,
   uint16_t entries   = 0;
   for (size_t i = 0; i < fullPaths.size(); i++) {
     uint16_t namelen = archiveNames[i].length();
-    totalSize += 30 + namelen + sizes[i] + 16;   // local hdr + name + data + dd
+    totalSize += 30 + namelen + sizes[i];   // local hdr + name + data (no data descriptor)
     cdSize    += 46 + namelen;
     entries++;
   }
   totalSize += cdSize + 22;
   Serial.printf("ZIP: %u entries, total %u bytes\n", entries, totalSize);
 
-  // Build each file's full ZIP entry (local header + name + data + data
-  // descriptor) in a single PSRAM buffer and emit it with one
-  // client.write(). This minimises per-call TCP overhead, which was the
-  // main reason raw chunked / sendContent paths felt slow.
+  // Traditional ZIP format: CRC and sizes are written inline in the local
+  // file header (no data descriptor / no flag bit 3). Each entry is fully
+  // self-contained, which lets streaming download managers (Vivaldi etc.)
+  // mark the download complete as soon as Content-Length bytes arrive.
+  // Each file's complete entry (hdr + name + data) is built in one
+  // PSRAM buffer and emitted via a single client.write().
   httpSrv.sendHeader("Content-Type", "application/zip");
   httpSrv.sendHeader("Content-Disposition", "attachment; filename=\"" + zipName + "\"");
   httpSrv.sendHeader("Connection", "close");
@@ -575,8 +577,8 @@ static void streamZip(const String &zipName,
     uint16_t namelen = name.length();
     uint32_t size = sizes[i];
 
-    // Per-file buffer: hdr (30) + name + data + dd (16)
-    size_t bufSize = 30 + namelen + size + 16;
+    // Per-file buffer: hdr (30) + name + data
+    size_t bufSize = 30 + namelen + size;
     uint8_t *fb = (uint8_t*)ps_malloc(bufSize);
     if (!fb) {
       Serial.printf("ZIP: ps_malloc(%u) failed for entry %u\n", (unsigned)bufSize, (unsigned)i);
@@ -592,16 +594,7 @@ static void streamZip(const String &zipName,
       continue;
     }
 
-    // Local file header (CRC=0, sizes=0, flag bit 3 = data descriptor follows)
-    memset(fb, 0, 30);
-    fb[0]=0x50; fb[1]=0x4b; fb[2]=0x03; fb[3]=0x04;
-    fb[4]=20;
-    fb[6]=0x08;
-    fb[12]=0x21;
-    fb[26]= namelen & 0xFF; fb[27]=(namelen>>8)&0xFF;
-    memcpy(fb + 30, name.c_str(), namelen);
-
-    // File data: read into the buffer at offset (30 + namelen) and CRC32
+    // Read file data into the buffer at offset (30 + namelen) and CRC32 it.
     File f = SD.open(fullPaths[i]);
     uint32_t crc = 0;
     uint32_t pos = 30 + namelen;
@@ -619,14 +612,20 @@ static void streamZip(const String &zipName,
     }
     if (f) f.close();
 
-    // Data descriptor at end of buffer (signature + CRC + 2x size = 16 byte)
-    pos = 30 + namelen + size;
-    fb[pos+0]=0x50; fb[pos+1]=0x4b; fb[pos+2]=0x07; fb[pos+3]=0x08;
-    fb[pos+4]= crc       & 0xFF; fb[pos+5]=(crc>>8)&0xFF; fb[pos+6]=(crc>>16)&0xFF; fb[pos+7]=(crc>>24)&0xFF;
-    fb[pos+8]= size      & 0xFF; fb[pos+9]=(size>>8)&0xFF; fb[pos+10]=(size>>16)&0xFF; fb[pos+11]=(size>>24)&0xFF;
-    fb[pos+12]=size      & 0xFF; fb[pos+13]=(size>>8)&0xFF; fb[pos+14]=(size>>16)&0xFF; fb[pos+15]=(size>>24)&0xFF;
+    // Local file header (with actual CRC and sizes; flag = 0).
+    memset(fb, 0, 30);
+    fb[0]=0x50; fb[1]=0x4b; fb[2]=0x03; fb[3]=0x04;
+    fb[4]=20;                                  // version needed
+    // fb[6..7] = flag = 0 (no data descriptor)
+    // fb[8..9] = method = 0 (store)
+    fb[12]=0x21;                                // mod date placeholder
+    fb[14]= crc       & 0xFF; fb[15]=(crc>>8)&0xFF; fb[16]=(crc>>16)&0xFF; fb[17]=(crc>>24)&0xFF;
+    fb[18]= size      & 0xFF; fb[19]=(size>>8)&0xFF; fb[20]=(size>>16)&0xFF; fb[21]=(size>>24)&0xFF;
+    fb[22]= size      & 0xFF; fb[23]=(size>>8)&0xFF; fb[24]=(size>>16)&0xFF; fb[25]=(size>>24)&0xFF;
+    fb[26]= namelen   & 0xFF; fb[27]=(namelen>>8)&0xFF;
+    memcpy(fb + 30, name.c_str(), namelen);
 
-    // One single write for the entire file entry
+    // One single write for the entire file entry.
     size_t written = 0;
     while (written < bufSize) {
       size_t w = client.write(fb + written, bufSize - written);
@@ -638,12 +637,12 @@ static void streamZip(const String &zipName,
     }
     free(fb);
 
-    // Central directory entry
+    // Central directory entry (mirrors the local header, flag = 0).
     uint8_t cd[46];
     memset(cd, 0, 46);
     cd[0]=0x50; cd[1]=0x4b; cd[2]=0x01; cd[3]=0x02;
     cd[4]=20; cd[6]=20;
-    cd[8]=0x08;
+    // cd[8..9] = flag = 0
     cd[12]=0x21;
     cd[16]= crc       & 0xFF; cd[17]=(crc>>8)&0xFF; cd[18]=(crc>>16)&0xFF; cd[19]=(crc>>24)&0xFF;
     cd[20]= size      & 0xFF; cd[21]=(size>>8)&0xFF; cd[22]=(size>>16)&0xFF; cd[23]=(size>>24)&0xFF;
