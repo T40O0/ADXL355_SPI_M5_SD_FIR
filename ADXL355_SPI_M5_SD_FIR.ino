@@ -596,6 +596,9 @@ static void streamZip(const String &zipName,
   httpSrv.setContentLength(totalSize);
   httpSrv.send(200, "application/zip", "");
   WiFiClient client = httpSrv.client();
+  // [改善] Nagle's algorithm 無効化: 小〜中サイズの write を即時送信し、ブラウザ
+  //       (Vivaldi 等) が短時間で進捗を確認できるようにする
+  client.setNoDelay(true);
 
   // ---- ZIP 本体ストリーミング (data descriptor 方式で 1 read/file) ----
   String centralDir;
@@ -604,7 +607,9 @@ static void streamZip(const String &zipName,
 
   uint8_t hdr[30];
   uint8_t dd[16];
-  uint8_t buf[1024];
+  // [改善] バッファを 1KB → 4KB に拡大: SD read 回数を 1/4 に減らし、
+  //       WiFi/SD I/O の重なりで全体スループット向上
+  uint8_t buf[4096];
 
   for (size_t i = 0; i < fullPaths.size(); i++) {
     const String &name = archiveNames[i];
@@ -681,6 +686,8 @@ static void streamZip(const String &zipName,
   eocd[16]= cdOffset& 0xFF; eocd[17]=(cdOffset>>8)&0xFF; eocd[18]=(cdOffset>>16)&0xFF; eocd[19]=(cdOffset>>24)&0xFF;
   client.write(eocd, 22);
   client.flush();
+  // [改善] 明示的にコネクションを閉じる (Vivaldi が EOF を確実に検出できる)
+  client.stop();
 }
 
 // [U3] /zip?p=<folder>: 指定フォルダ内の全ファイルを ZIP で DL
@@ -763,11 +770,13 @@ void Data_Dump_HTTP() {
   WiFi.softAP("M5-SEISMO", "m5seismo");
 
   // [U3] WebServer ルーティング
-  httpSrv.on("/",       HTTP_GET, handleRoot);
-  httpSrv.on("/folder", HTTP_GET, handleFolder);
-  httpSrv.on("/dl",     HTTP_GET, handleDownload);
-  httpSrv.on("/zip",    HTTP_GET, handleZipFolder);
-  httpSrv.on("/zipall", HTTP_GET, handleZipAll);
+  // [改善] HTTP メソッド指定を省略 → GET/HEAD 双方を受ける。Vivaldi 等が
+  //       事前に HEAD でリソース確認するケースに対応。
+  httpSrv.on("/",       handleRoot);
+  httpSrv.on("/folder", handleFolder);
+  httpSrv.on("/dl",     handleDownload);
+  httpSrv.on("/zip",    handleZipFolder);
+  httpSrv.on("/zipall", handleZipAll);
   httpSrv.begin();
 
   M5.Lcd.printf("SSID: M5-SEISMO\n");
@@ -845,20 +854,18 @@ void setup() {
   struct Btn { const char *label; int y; };
   Btn btns[4] = {
     {"Wi-Fi Setting", btnY0 + 0 * (btnH + btnGap)},
-    {"Reset RTC!",    btnY0 + 1 * (btnH + btnGap)},
+    {"Reset RTC",     btnY0 + 1 * (btnH + btnGap)},   // [改善] "!" 削除
     {"Manual Set",    btnY0 + 2 * (btnH + btnGap)},
     {"Data Dump",     btnY0 + 3 * (btnH + btnGap)},
   };
-  // ボタン描画 (font 4 で読みやすく、太字感のある表示)
+  // ボタン描画 (font 4 で読みやすく)
+  // [改善] 全ラベルを左揃え (btnX+25)。Wi-Fi Setting が他と同じ X 開始位置になる。
   for (int i = 0; i < 4; i++) {
     M5.Lcd.fillRoundRect(btnX,     btns[i].y,     btnW,     btnH,     btnR, RED);
     M5.Lcd.fillRoundRect(btnX + 4, btns[i].y + 4, btnW - 8, btnH - 8, btnR, ORANGE);
     M5.Lcd.setTextFont(4);
     M5.Lcd.setTextColor(BLACK, ORANGE);
-    // ラベルを中央寄せ気味に (font 4 は char 幅 ~13px)
-    int textX = btnX + (btnW - (int)strlen(btns[i].label) * 13) / 2;
-    if (textX < btnX + 5) textX = btnX + 5;
-    M5.Lcd.setCursor(textX, btns[i].y + 8);
+    M5.Lcd.setCursor(btnX + 25, btns[i].y + 8);
     M5.Lcd.print(btns[i].label);
   }
   M5.Lcd.setTextColor(BLACK, WHITE);
