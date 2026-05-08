@@ -2,9 +2,6 @@
 #include <M5Unified.h>
 #include <M5_ADXL355.h>
 
-// Self-contained minimal FTP server for the Data Dump mode.
-// Uses only WiFi.h (WiFiServer/WiFiClient) - no external library.
-
 //==============================================================================
 // for RTC
 // M5Unified Sample
@@ -18,7 +15,6 @@
 
 #include <WiFi.h>
 
-// Different versions of the framework have different SNTP header file names and availability.
 #if __has_include (<esp_sntp.h>)
   #include <esp_sntp.h>
   #define SNTP_ENABLED 1
@@ -38,7 +34,7 @@
 //   100 Hz : ADXL355 ODR=500 Hz, 201-tap FIR, 50 Hz cutoff (FIR500_cut50.csv).
 //   500 Hz : ADXL355 ODR=1000 Hz, 80-tap minimum-phase FIR (Telemetra min500.cf,
 //            passband 200 Hz, stopband 250 Hz @ -120 dB).
-#define SAMPLE_HZ 100
+#define SAMPLE_HZ 500
 
 unsigned int hz = SAMPLE_HZ;
 unsigned int dtWrite = 1000 / hz;
@@ -114,10 +110,8 @@ auto syncTime = PL::ADXL355_Synchronization::internal;
 
 //==============================================================================
 
-// define two tasks
 void TaskRead( void *pvParameters );
 void TaskSave( void *pvParameters );
-// queue
 xQueueHandle xQueue;
 
 // FTP server state (Data Dump mode). See MiniFTP definitions below.
@@ -146,9 +140,7 @@ void createPath() {
 }
 //==============================================================================
 
-// Safe TF-open helper that retries on failure.
-// Retries every 1 second, remounts the TF every 30 seconds
-//  to recover from  transient contact issues or write stalls.
+// Safe TF-open helper: retry every 1 s, remount every 30 s.
 static File openSDFileSafe(const char *path, const char *mode) {
   File f;
   uint32_t retry = 0;
@@ -238,12 +230,9 @@ static void rtcConfirmScreen() {
 
 //==============================================================================
 
-// Common tail for every RTC-setting path: mirror the just-written M5 RTC
-// into the system clock and show the 10-second confirmation screen.
-// Used by:
-//   - Set_RTC: after writing the NTP-derived time into the RTC
-//   - Manual_Set: after writing the user-input time into the RTC
-//   - setup() menu timeout: nothing else has touched the system clock yet
+// Common tail for every RTC-setting path (Set_RTC / Manual_Set / menu
+// timeout): mirror the just-written M5 RTC into the system clock and
+// show the 10-second confirmation screen.
 static void applyRtcAndConfirm() {
   auto rtcDt = M5.Rtc.getDateTime();
   struct tm tmRtc = {};
@@ -406,28 +395,48 @@ void Manual_Set() {
 
   drawAll();
 
+  // Long-press auto-repeat: HOLD_DELAY -> REPEAT_SLOW -> REPEAT_FAST after ACCEL_AFTER.
+  const uint32_t HOLD_DELAY_MS    = 400;
+  const uint32_t REPEAT_SLOW_MS   = 150;
+  const uint32_t REPEAT_FAST_MS   = 50;
+  const uint32_t ACCEL_AFTER_MS   = 2000;
+  int      holdBtn   = -1;          // adjust() idx (0..5), -1 = no hold
+  int      holdDelta = 0;
+  int      holdRow   = 0;           // upY or dnY (for in-button check)
+  uint32_t holdStart = 0;
+  uint32_t lastRepeat = 0;
+
   while (true) {
     M5.update();
     auto t = M5.Touch.getDetail();
+    uint32_t now = millis();
+
     if (t.wasPressed()) {
       int xt = t.x;
       int yt = t.y;
+      bool handled = false;
 
-      for (int i = 0; i < 6; i++) {
+      for (int i = 0; i < 6 && !handled; i++) {
         if (xt >= xs[i] && xt <= xs[i] + colW[i] &&
             yt >= upY  && yt <= upY  + btnH) {
           adjust(i, +1);
           drawAll();
+          holdBtn = i; holdDelta = +1; holdRow = upY;
+          holdStart = lastRepeat = now;
+          handled = true;
         }
       }
-      for (int i = 0; i < 6; i++) {
+      for (int i = 0; i < 6 && !handled; i++) {
         if (xt >= xs[i] && xt <= xs[i] + colW[i] &&
             yt >= dnY  && yt <= dnY  + btnH) {
           adjust(i, -1);
           drawAll();
+          holdBtn = i; holdDelta = -1; holdRow = dnY;
+          holdStart = lastRepeat = now;
+          handled = true;
         }
       }
-      if (xt >= 20 && xt <= 150 && yt >= 195 && yt <= 235) {
+      if (!handled && xt >= 20 && xt <= 150 && yt >= 195 && yt <= 235) {
         auto newdt = M5.Rtc.getDateTime();
         newdt.date.year   = year;
         newdt.date.month  = month;
@@ -435,10 +444,7 @@ void Manual_Set() {
         newdt.time.hours  = hour;
         newdt.time.minutes= minute;
         newdt.time.seconds= second;
-        // PCF8563-class RTCs store weekday in a separate register and do
-        // NOT derive it from the date. If we leave it untouched, RTC display
-        // shows the previous (wrong) weekday until next NTP sync. Compute
-        // it from the date with Sakamoto's method (0=Sun..6=Sat).
+        // PCF8563 stores weekday in a separate register; compute it from the date.
         {
           static const int sakamoto_t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
           int yy = year - (month < 3 ? 1 : 0);
@@ -447,14 +453,39 @@ void Manual_Set() {
         }
         M5.Rtc.setDateTime(&newdt);
 
-        // Mirror the new RTC value into the system clock + show 10 s
+        // Mirror the new RTC value into the system clock + show 10 s confirmation.
         applyRtcAndConfirm();
         return;
       }
-      if (xt >= 170 && xt <= 300 && yt >= 195 && yt <= 235) {
+      if (!handled && xt >= 170 && xt <= 300 && yt >= 195 && yt <= 235) {
         return;
       }
     }
+
+    // While a +/- button is held, fire repeats after the initial delay, then accelerate. 
+    if (holdBtn >= 0) {
+      if (!t.isPressed()) {
+        holdBtn = -1;
+      } else {
+        int xt = t.x, yt = t.y;
+        bool stillIn = (xt >= xs[holdBtn] && xt <= xs[holdBtn] + colW[holdBtn] &&
+                        yt >= holdRow    && yt <= holdRow    + btnH);
+        if (!stillIn) {
+          holdBtn = -1;
+        } else {
+          uint32_t held = now - holdStart;
+          if (held >= HOLD_DELAY_MS) {
+            uint32_t interval = (held >= ACCEL_AFTER_MS) ? REPEAT_FAST_MS
+                                                         : REPEAT_SLOW_MS;
+            if (now - lastRepeat >= interval) {
+              adjust(holdBtn, holdDelta); drawAll();
+              lastRepeat = now;
+            }
+          }
+        }
+      }
+    }
+
     delay(20);
   }
 }
@@ -547,7 +578,6 @@ static void ftpHandleCmd(const String &line) {
     else        ftpCwd = "/";
     ftpReply(200, "Up");
   } else if (cmd == "PASV") {
-    // Make sure the data server is listening on the fixed PASV port.
     ftpDataSrv.begin();
     uint8_t pH = (FTP_PASV_PORT >> 8) & 0xff;
     uint8_t pL = FTP_PASV_PORT & 0xff;
@@ -570,7 +600,6 @@ static void ftpHandleCmd(const String &line) {
         if (namesOnly) {
           dc.printf("%s\r\n", name.c_str());
         } else {
-          // UNIX-style ls -l output (Explorer parses this format).
           const char *mode = entry.isDirectory() ? "drwxr-xr-x" : "-rw-r--r--";
           dc.printf("%s 1 m5 m5 %u Jan 01  2026 %s\r\n",
                     mode, (unsigned)entry.size(), name.c_str());
@@ -720,7 +749,6 @@ void Data_Dump_FTP() {
 //==============================================================================
 
 void setup() {
-  // Initialize M5
   auto cfg = M5.config();
   cfg.serial_baudrate = 921600;
   cfg.clear_display = true;
@@ -767,10 +795,8 @@ void setup() {
   M5.Lcd.print("Tap a button:");
 
   int prevSec = -1;
-  // dispatched is hoisted out of the loop so the post-menu code can tell
-  // whether a handler ran (Wi-Fi / Reset RTC / Manual Set already sync the
-  // system clock + show rtcConfirmScreen) or the loop fell out via the 30 s
-  // timeout (which needs the catch-up call below).
+  // dispatched is visible to the post-menu code so the timeout path can
+  // run applyRtcAndConfirm() (handlers already do it themselves).
   bool dispatched = false;
   for (int i = 300; i > 0; --i) {
     M5.update();
@@ -805,7 +831,6 @@ void setup() {
   }
   //==============================================================================
 
-  // Initialize ADXL355
   adxl355.begin();
   adxl355.setRange(range);
   adxl355.setOutputDataRate(ODR);
@@ -827,7 +852,6 @@ void setup() {
     delay(2000);
   }
 
-  // Start SD
   while (!SD.begin(GPIO_NUM_4, SPI, 10000000)) {
     txtWrite("ERROR: SD CARD", BLACK);
     delay(100);
@@ -982,8 +1006,7 @@ void TaskSave(void *pvParameters) {
       continue;
     }
 
-    // First batch: create the initial file using the post sec=0 RTC,
-    // so the file name reflects the actual data start minute.
+    // First batch: create file with post sec=0 RTC so name matches start minute.
     if (firstBatch) {
       auto firstDt = M5.Rtc.getDateTime();
       portENTER_CRITICAL(&dtMux);
