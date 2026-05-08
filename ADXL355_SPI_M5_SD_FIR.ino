@@ -435,6 +435,16 @@ void Manual_Set() {
         newdt.time.hours  = hour;
         newdt.time.minutes= minute;
         newdt.time.seconds= second;
+        // PCF8563-class RTCs store weekday in a separate register and do
+        // NOT derive it from the date. If we leave it untouched, RTC display
+        // shows the previous (wrong) weekday until next NTP sync. Compute
+        // it from the date with Sakamoto's method (0=Sun..6=Sat).
+        {
+          static const int sakamoto_t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+          int yy = year - (month < 3 ? 1 : 0);
+          newdt.date.weekDay = (yy + yy/4 - yy/100 + yy/400
+                                + sakamoto_t[month - 1] + day) % 7;
+        }
         M5.Rtc.setDateTime(&newdt);
 
         // Mirror the new RTC value into the system clock + show 10 s
