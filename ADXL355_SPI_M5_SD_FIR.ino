@@ -237,6 +237,29 @@ static void rtcConfirmScreen() {
 }
 
 //==============================================================================
+
+// Common tail for every RTC-setting path: mirror the just-written M5 RTC
+// into the system clock and show the 10-second confirmation screen.
+// Used by:
+//   - Set_RTC: after writing the NTP-derived time into the RTC
+//   - Manual_Set: after writing the user-input time into the RTC
+//   - setup() menu timeout: nothing else has touched the system clock yet
+static void applyRtcAndConfirm() {
+  auto rtcDt = M5.Rtc.getDateTime();
+  struct tm tmRtc = {};
+  tmRtc.tm_year = rtcDt.date.year - 1900;
+  tmRtc.tm_mon  = rtcDt.date.month - 1;
+  tmRtc.tm_mday = rtcDt.date.date;
+  tmRtc.tm_hour = rtcDt.time.hours;
+  tmRtc.tm_min  = rtcDt.time.minutes;
+  tmRtc.tm_sec  = rtcDt.time.seconds;
+  time_t tt = mktime(&tmRtc);
+  struct timeval tv = { tt, 0 };
+  settimeofday(&tv, nullptr);
+  rtcConfirmScreen();
+}
+
+//==============================================================================
 void Set_RTC() {
   M5.Lcd.fillScreen(WHITE);
   M5.Lcd.setCursor(0,0);
@@ -279,7 +302,7 @@ void Set_RTC() {
   while (t > time(nullptr));
   M5.Rtc.setDateTime(localtime(&t));
 
-  rtcConfirmScreen();
+  applyRtcAndConfirm();
   WiFi.disconnect(true);
 }
 //==============================================================================
@@ -414,19 +437,9 @@ void Manual_Set() {
         newdt.time.seconds= second;
         M5.Rtc.setDateTime(&newdt);
 
-        struct tm tmSet = {};
-        tmSet.tm_year = year - 1900;
-        tmSet.tm_mon  = month - 1;
-        tmSet.tm_mday = day;
-        tmSet.tm_hour = hour;
-        tmSet.tm_min  = minute;
-        tmSet.tm_sec  = second;
-        time_t tt = mktime(&tmSet);
-        struct timeval tv = { tt, 0 };
-        settimeofday(&tv, nullptr);
-
-        // Same 10-second confirmation screen as Set_RTC.
-        rtcConfirmScreen();
+        // Mirror the new RTC value into the system clock + show 10 s
+        // confirmation. Identical tail to Set_RTC and the menu timeout.
+        applyRtcAndConfirm();
         return;
       }
       if (xt >= 170 && xt <= 300 && yt >= 195 && yt <= 235) {
@@ -745,11 +758,15 @@ void setup() {
   M5.Lcd.print("Tap a button:");
 
   int prevSec = -1;
+  // dispatched is hoisted out of the loop so the post-menu code can tell
+  // whether a handler ran (Wi-Fi / Reset RTC / Manual Set already sync the
+  // system clock + show rtcConfirmScreen) or the loop fell out via the 30 s
+  // timeout (which needs the catch-up call below).
+  bool dispatched = false;
   for (int i = 300; i > 0; --i) {
     M5.update();
     auto td = M5.Touch.getDetail();
     int xt = td.x, yt = td.y;
-    bool dispatched = false;
     if (td.wasPressed()) {
       for (int b = 0; b < 4; b++) {
         if (xt >= btnX && xt <= btnX + btnW &&
@@ -813,6 +830,13 @@ void setup() {
     Serial.println(dt.date.year);
     delay(10);
     dt = M5.Rtc.getDateTime();
+  }
+
+  // Timeout-path catch-up: if no menu handler ran (30 s timeout), nothing
+  // has set the system clock or shown rtcConfirmScreen yet. Mirror the RTC
+  // into the system clock and show the same 10 s confirmation screen.
+  if (!dispatched) {
+    applyRtcAndConfirm();
   }
 
   // Queue holds up to 3 String pointers to absorb transient SD delays.
