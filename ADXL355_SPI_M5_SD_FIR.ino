@@ -393,6 +393,20 @@ void Manual_Set() {
     }
   };
 
+  // Partial redraw of one digit cell only (avoids fillScreen flicker
+  // during long-press auto-repeat).
+  auto drawValue = [&](int idx){
+    M5.Lcd.fillRect(xs[idx], 75, colW[idx], 40, WHITE);
+    M5.Lcd.setTextFont(4);
+    M5.Lcd.setTextColor(BLACK, WHITE);
+    M5.Lcd.setCursor(xs[idx] + 2, 80);
+    char buf[8];
+    int vals[6] = {year, month, day, hour, minute, second};
+    if (idx == 0) sprintf(buf, "%04d", vals[idx]);
+    else          sprintf(buf, "%02d", vals[idx]);
+    M5.Lcd.print(buf);
+  };
+
   drawAll();
 
   // Long-press auto-repeat: HOLD_DELAY -> REPEAT_SLOW -> REPEAT_FAST after ACCEL_AFTER.
@@ -420,7 +434,7 @@ void Manual_Set() {
         if (xt >= xs[i] && xt <= xs[i] + colW[i] &&
             yt >= upY  && yt <= upY  + btnH) {
           adjust(i, +1);
-          drawAll();
+          drawValue(i);
           holdBtn = i; holdDelta = +1; holdRow = upY;
           holdStart = lastRepeat = now;
           handled = true;
@@ -430,7 +444,7 @@ void Manual_Set() {
         if (xt >= xs[i] && xt <= xs[i] + colW[i] &&
             yt >= dnY  && yt <= dnY  + btnH) {
           adjust(i, -1);
-          drawAll();
+          drawValue(i);
           holdBtn = i; holdDelta = -1; holdRow = dnY;
           holdStart = lastRepeat = now;
           handled = true;
@@ -478,7 +492,7 @@ void Manual_Set() {
             uint32_t interval = (held >= ACCEL_AFTER_MS) ? REPEAT_FAST_MS
                                                          : REPEAT_SLOW_MS;
             if (now - lastRepeat >= interval) {
-              adjust(holdBtn, holdDelta); drawAll();
+              adjust(holdBtn, holdDelta); drawValue(holdBtn);
               lastRepeat = now;
             }
           }
@@ -1026,6 +1040,10 @@ void TaskSave(void *pvParameters) {
     portENTER_CRITICAL(&dtMux);
     dt = localDt;      portEXIT_CRITICAL(&dtMux);
 
+    // Power save: backlight ON only while showing the per-batch panel
+    // (~3 s out of every SDWriteTime), OFF otherwise.
+    M5.Lcd.setBrightness(100);
+
     M5.Lcd.fillScreen(BLACK);
     M5.Lcd.setTextColor(WHITE, BLACK);
     M5.Lcd.setTextFont(4);
@@ -1052,6 +1070,7 @@ void TaskSave(void *pvParameters) {
 
     delay(SDWriteTime * 1000 / 5);
     M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setBrightness(0); //End
 
     delete recData;
     recData = nullptr;
