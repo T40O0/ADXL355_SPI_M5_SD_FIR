@@ -438,7 +438,6 @@ void Manual_Set() {
         M5.Rtc.setDateTime(&newdt);
 
         // Mirror the new RTC value into the system clock + show 10 s
-        // confirmation. Identical tail to Set_RTC and the menu timeout.
         applyRtcAndConfirm();
         return;
       }
@@ -832,9 +831,6 @@ void setup() {
     dt = M5.Rtc.getDateTime();
   }
 
-  // Timeout-path catch-up: if no menu handler ran (30 s timeout), nothing
-  // has set the system clock or shown rtcConfirmScreen yet. Mirror the RTC
-  // into the system clock and show the same 10 s confirmation screen.
   if (!dispatched) {
     applyRtcAndConfirm();
   }
