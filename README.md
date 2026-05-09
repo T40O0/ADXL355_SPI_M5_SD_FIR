@@ -13,7 +13,7 @@ Hats off to PL.
  - Selectable output rate at compile time: **100 Hz** or  **500 Hz** .
  - Dual-core FreeRTOS pipeline (TaskRead on PRO_CPU, TaskSave on APP_CPU) decouples sampling from SD I/O.
  - One CSV file per minute on a TF card; daily folder layout (`/YYYYMMDD/HHMM.csv`).
- - Built-in Wi-Fi AP + FTP server for data retrieval (no SD card removal required).
+ - Built-in Wi-Fi AP + FTP server for data retrieva.
  - Dust- and water-resistant (do not submerge the case in water or other liquids).
  - Made of UV-resistant plastic, so it can be used outdoors and in areas where acid gases are generated, such as volcanic regions.
 
