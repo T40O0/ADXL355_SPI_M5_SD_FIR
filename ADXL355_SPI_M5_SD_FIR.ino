@@ -36,6 +36,11 @@
 //            passband 200 Hz, stopband 250 Hz @ -120 dB).
 #define SAMPLE_HZ 500
 
+// Per-sample Serial output in TaskRead (debug only).
+// Leave 0 for SAMPLE_HZ=500: 4 prints per 1 ms loop saturate the UART
+// buffer and add jitter to the vTaskDelayUntil cycle.
+#define ENABLE_SERIAL_SAMPLES 0
+
 unsigned int hz = SAMPLE_HZ;
 unsigned int dtWrite = 1000 / hz;
 unsigned int SDWriteTime = 15;
@@ -51,12 +56,6 @@ int fileDateTime;
 File f;
 
 const String accHeader = "Time(msec),x(cm/s2),y(cm/s2),z(cm/s2)";
-double AccX = 0.;
-double AccY = 0.;
-double AccZ = 0.;
-double AccFirX = 0.;
-double AccFirY = 0.;
-double AccFirZ = 0.;
 
 // FIR taps and coefficients depend on SAMPLE_HZ.
 // Files live in the sketch's FIR/ subfolder.
@@ -923,6 +922,8 @@ void TaskRead(void *pvParameters) {
   unsigned int j = 1;
   unsigned int k = 0;
   unsigned int l = 0;
+  double AccX = 0., AccY = 0., AccZ = 0.;
+  double AccFirX = 0., AccFirY = 0., AccFirZ = 0.;
   String accData;
   accData.reserve(ACCDATA_RESERVE);
 
@@ -973,6 +974,7 @@ void TaskRead(void *pvParameters) {
     accData += ',';
     accData += AccFirZ;
 
+#if ENABLE_SERIAL_SAMPLES
     Serial.print(sTime);
     Serial.print(", ");
     Serial.print(AccFirX);
@@ -980,6 +982,7 @@ void TaskRead(void *pvParameters) {
     Serial.print(AccFirY);
     Serial.print(", ");
     Serial.println(AccFirZ);
+#endif
 
     latestX = AccFirX;
     latestY = AccFirY;
